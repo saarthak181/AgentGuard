@@ -1,138 +1,219 @@
-from pathlib import Path
 import ast
 import operator
+from pathlib import Path
 
 
-# ============================================================
+DOCUMENT_FOLDER = Path("data/documents").resolve()
+
+
+# =========================================================
 # SAFE CALCULATOR
-# ============================================================
+# =========================================================
 
-_ALLOWED_OPERATORS = {
+ALLOWED_OPERATORS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
     ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
     ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
 }
 
 
-def _safe_eval(node):
+def _safe_calculate(node):
+
     if isinstance(node, ast.Constant):
+
         if isinstance(node.value, (int, float)):
             return node.value
 
         raise ValueError("Only numbers are allowed.")
 
-    if isinstance(node, ast.BinOp):
-        left = _safe_eval(node.left)
-        right = _safe_eval(node.right)
-
-        operation = _ALLOWED_OPERATORS.get(type(node.op))
-
-        if operation is None:
-            raise ValueError("Operator not allowed.")
-
-        return operation(left, right)
-
     if isinstance(node, ast.UnaryOp):
-        operand = _safe_eval(node.operand)
 
-        operation = _ALLOWED_OPERATORS.get(type(node.op))
+        operator_type = type(node.op)
 
-        if operation is None:
+        if operator_type not in ALLOWED_OPERATORS:
             raise ValueError("Operator not allowed.")
 
-        return operation(operand)
+        return ALLOWED_OPERATORS[operator_type](
+            _safe_calculate(node.operand)
+        )
+
+    if isinstance(node, ast.BinOp):
+
+        operator_type = type(node.op)
+
+        if operator_type not in ALLOWED_OPERATORS:
+            raise ValueError("Operator not allowed.")
+
+        left = _safe_calculate(node.left)
+        right = _safe_calculate(node.right)
+
+        return ALLOWED_OPERATORS[operator_type](
+            left,
+            right
+        )
 
     raise ValueError("Invalid mathematical expression.")
 
 
-def calculator(expression: str):
-    """
-    Safely evaluate a basic mathematical expression.
-    """
+def calculator(expression):
 
-    try:
-        tree = ast.parse(expression, mode="eval")
-        result = _safe_eval(tree.body)
+    if not isinstance(expression, str):
+        raise ValueError("Expression must be a string.")
 
-        return f"Result: {result}"
+    expression = expression.strip()
 
-    except Exception as e:
-        return f"Calculator error: {str(e)}"
+    if not expression:
+        raise ValueError("Expression cannot be empty.")
 
+    tree = ast.parse(expression, mode="eval")
 
-# ============================================================
-# DOCUMENT DIRECTORY
-# ============================================================
-
-DOCUMENT_FOLDER = Path("data/documents")
+    return str(_safe_calculate(tree.body))
 
 
-# ============================================================
-# FILE SEARCH
-# ============================================================
+# =========================================================
+# SEARCH FILES
+# =========================================================
 
-def search_files(keyword: str):
-    """
-    Search for a keyword inside files located in
-    data/documents/.
-    """
+def search_files(query=None, filename=None):
+
+    # Accept either query or filename.
+    search_term = query if query is not None else filename
+
+    if not isinstance(search_term, str):
+        raise ValueError(
+            "A search query or filename is required."
+        )
+
+    search_term = search_term.strip().lower()
+
+    if not search_term:
+        return "Please provide a search query."
 
     if not DOCUMENT_FOLDER.exists():
-        return "Document folder does not exist."
+        return "The documents directory does not exist."
+
+    # Make searching tolerant of spaces vs underscores.
+    normalized_search = search_term.replace("_", " ")
 
     matches = []
 
-    for file in DOCUMENT_FOLDER.iterdir():
+    for file_path in DOCUMENT_FOLDER.rglob("*"):
 
-        if not file.is_file():
+        if not file_path.is_file():
             continue
 
-        try:
-            content = file.read_text(encoding="utf-8")
+        filename_lower = file_path.name.lower()
 
-            if keyword.lower() in content.lower():
-                matches.append(file.name)
+        normalized_filename = filename_lower.replace(
+            "_",
+            " "
+        )
 
-        except Exception:
-            continue
+        if (
+            search_term in filename_lower
+            or normalized_search in normalized_filename
+            or normalized_filename in normalized_search
+        ):
+            matches.append(file_path.name)
 
     if not matches:
-        return f"No documents found containing: {keyword}"
+        return (
+            f"No files found matching "
+            f"'{search_term}'."
+        )
 
-    return "Matching documents:\n" + "\n".join(matches)
+    return "\n".join(matches)
 
 
-# ============================================================
-# FILE READER
-# ============================================================
+# =========================================================
+# READ FILE
+# =========================================================
 
-def read_file(filename: str):
-    """
-    Read a file only from data/documents/.
-    """
+def read_file(filename):
 
-    file_path = DOCUMENT_FOLDER / filename
+    if not isinstance(filename, str):
+        raise ValueError("Filename must be a string.")
 
-    if not file_path.exists():
-        return f"File not found: {filename}"
+    filename = filename.strip()
 
-    if not file_path.is_file():
-        return "The requested path is not a file."
+    if not filename:
+        raise ValueError("Filename cannot be empty.")
+
+    # Normalize spaces and underscores.
+    # This allows:
+    # sales report.txt
+    # sales_report.txt
+    normalized_filename = filename.replace(
+        " ",
+        "_"
+    )
+
+    requested_path = (
+        DOCUMENT_FOLDER / normalized_filename
+    ).resolve()
+
+    # Security check against path traversal.
+    try:
+        requested_path.relative_to(DOCUMENT_FOLDER)
+    except ValueError:
+        raise ValueError(
+            "Access to this file is not allowed."
+        )
+
+    if not requested_path.exists():
+
+        # Try to find a matching file.
+        matches = []
+
+        for file_path in DOCUMENT_FOLDER.rglob("*"):
+
+            if not file_path.is_file():
+                continue
+
+            if file_path.name.lower().replace(
+                "_",
+                " "
+            ) == filename.lower().replace(
+                "_",
+                " "
+            ):
+                matches.append(file_path)
+
+        if matches:
+            requested_path = matches[0]
+
+        else:
+            return f"File not found: {filename}"
+
+    if not requested_path.is_file():
+        return f"Not a file: {filename}"
 
     try:
-        return file_path.read_text(encoding="utf-8")
 
-    except Exception as e:
-        return f"File reading error: {str(e)}"
+        with open(
+            requested_path,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            return file.read()
+
+    except UnicodeDecodeError:
+
+        return (
+            "Unable to read this file "
+            "as a text document."
+        )
 
 
-# ============================================================
-# TOOL REGISTRY
-# ============================================================
+# =========================================================
+# AVAILABLE TOOLS
+# =========================================================
 
 TOOLS = {
     "calculator": calculator,

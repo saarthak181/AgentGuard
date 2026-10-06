@@ -2,207 +2,268 @@ from security.logger import log_action
 
 
 class AgentGuard:
+    """
+    Security layer between the AI agent and its tools.
+    """
 
-    def __init__(self):
+    SENSITIVE_KEYWORDS = [
+        "password",
+        "credential",
+        "secret",
+        "token",
+        "private_key",
+        "private key",
+        "confidential"
+    ]
 
-        # ----------------------------------------------------
-        # Sensitive keywords
-        # ----------------------------------------------------
+    EXTERNAL_TOOLS = [
+        "api_request",
+        "email"
+    ]
 
-        self.sensitive_keywords = [
-            "password",
-            "credential",
-            "secret",
-            "token",
-            "private_key",
-            "confidential",
-        ]
-
-        # ----------------------------------------------------
-        # Tools that communicate externally
-        # ----------------------------------------------------
-
-        self.external_tools = [
-            "api_request",
-            "email",
-        ]
-
-    # ========================================================
-    # INSPECT ACTION
-    # ========================================================
-
-    def inspect_action(
-        self,
-        agent_id,
-        session_id,
-        tool_name,
-        arguments,
-    ):
+    def inspect_action(self, tool, arguments):
         """
-        Inspect a requested action before execution.
+        Inspect an action and determine its risk level.
         """
-
-        risk_level = "low"
-
-        reasons = []
 
         argument_text = str(arguments).lower()
 
-        # ----------------------------------------------------
-        # Sensitive information check
-        # ----------------------------------------------------
-
-        for keyword in self.sensitive_keywords:
+        # High-risk actions
+        for keyword in self.SENSITIVE_KEYWORDS:
 
             if keyword in argument_text:
 
-                risk_level = "high"
-
-                reasons.append(
+                return (
+                    "high",
                     f"Sensitive keyword detected: {keyword}"
                 )
 
-        # ----------------------------------------------------
-        # External communication check
-        # ----------------------------------------------------
+        # Medium-risk actions
+        if tool in self.EXTERNAL_TOOLS:
 
-        if tool_name in self.external_tools:
-
-            if risk_level != "high":
-                risk_level = "medium"
-
-            reasons.append(
-                "External communication tool requested."
+            return (
+                "medium",
+                f"External tool requires review: {tool}"
             )
 
-        # ----------------------------------------------------
-        # Decision
-        # ----------------------------------------------------
+        # Normal action
+        return (
+            "low",
+            "No immediate security concerns detected"
+        )
 
-        if risk_level == "high":
+    def _execute_tool(self, tool_function, tool, arguments):
+        """
+        Execute a tool while handling the current tool
+        argument formats.
 
-            decision = "block"
+        This prevents errors such as:
 
-        elif risk_level == "medium":
+        search_files() got an unexpected keyword argument 'query'
+        """
 
-            decision = "review"
+        # -----------------------------------------------------
+        # SEARCH FILES
+        # -----------------------------------------------------
+        # Some versions of search_files use a positional
+        # argument rather than query=.
+        #
+        # Example:
+        # search_files(search_term)
+        #
+        # So pass the value positionally.
 
-        else:
+        if tool == "search_files":
 
-            decision = "allow"
+            query = arguments.get("query")
 
-        return {
-            "risk_level": risk_level,
-            "decision": decision,
-            "reasons": reasons,
-        }
+            if query is None:
 
-    # ========================================================
-    # EXECUTE THROUGH AGENTGUARD
-    # ========================================================
+                query = arguments.get("search_term")
+
+            if query is None:
+
+                query = arguments.get("filename")
+
+            if query is None:
+
+                raise ValueError(
+                    "search_files requires a search query."
+                )
+
+            return tool_function(query)
+
+        # -----------------------------------------------------
+        # READ FILE
+        # -----------------------------------------------------
+
+        if tool == "read_file":
+
+            filename = arguments.get("filename")
+
+            if filename is None:
+
+                raise ValueError(
+                    "read_file requires a filename."
+                )
+
+            return tool_function(filename)
+
+        # -----------------------------------------------------
+        # CALCULATOR
+        # -----------------------------------------------------
+
+        if tool == "calculator":
+
+            expression = arguments.get("expression")
+
+            if expression is None:
+
+                raise ValueError(
+                    "calculator requires an expression."
+                )
+
+            return tool_function(expression)
+
+        # -----------------------------------------------------
+        # OTHER TOOLS
+        # -----------------------------------------------------
+
+        return tool_function(**arguments)
 
     def execute(
         self,
-        tool_function,
         agent_id,
         session_id,
-        tool_name,
-        arguments,
+        tool,
+        arguments
     ):
         """
-        AgentGuard execution pipeline:
+        Inspect and execute an agent tool action.
 
-        Inspect
-            ↓
-        Decide
-            ↓
-        Execute
-            ↓
-        Log
+        Returns:
+
+        True, result
+            if the action is allowed and successful.
+
+        False, reason
+            if the action is blocked, requires review,
+            or execution fails.
         """
 
-        inspection = self.inspect_action(
-            agent_id=agent_id,
-            session_id=session_id,
-            tool_name=tool_name,
-            arguments=arguments,
-        )
+        from agent.tools import TOOLS
 
-        # ----------------------------------------------------
-        # BLOCK HIGH-RISK ACTION
-        # ----------------------------------------------------
+        # -----------------------------------------------------
+        # CHECK TOOL
+        # -----------------------------------------------------
 
-        if inspection["decision"] == "block":
+        if tool not in TOOLS:
 
-            result = "ACTION BLOCKED BY AGENTGUARD"
+            reason = f"Unknown tool: {tool}"
 
             log_action(
                 agent_id=agent_id,
                 session_id=session_id,
-                tool_name=tool_name,
+                action=tool,
+                arguments=arguments,
+                result=reason,
+                status="blocked",
+                risk_level="high"
+            )
+
+            return False, reason
+
+        # -----------------------------------------------------
+        # SECURITY INSPECTION
+        # -----------------------------------------------------
+
+        risk_level, reason = self.inspect_action(
+            tool,
+            arguments
+        )
+
+        # -----------------------------------------------------
+        # HIGH RISK
+        # -----------------------------------------------------
+
+        if risk_level == "high":
+
+            result = f"Action blocked. {reason}"
+
+            log_action(
+                agent_id=agent_id,
+                session_id=session_id,
+                action=tool,
                 arguments=arguments,
                 result=result,
                 status="blocked",
-                risk_level=inspection["risk_level"],
+                risk_level="high"
             )
 
-            return {
-                "success": False,
-                "blocked": True,
-                "result": result,
-                "risk_level": inspection["risk_level"],
-                "decision": inspection["decision"],
-                "reasons": inspection["reasons"],
-            }
+            return False, result
 
-        # ----------------------------------------------------
-        # EXECUTE TOOL
-        # ----------------------------------------------------
+        # -----------------------------------------------------
+        # MEDIUM RISK
+        # -----------------------------------------------------
+
+        if risk_level == "medium":
+
+            result = f"Action requires review. {reason}"
+
+            log_action(
+                agent_id=agent_id,
+                session_id=session_id,
+                action=tool,
+                arguments=arguments,
+                result=result,
+                status="review",
+                risk_level="medium"
+            )
+
+            return False, result
+
+        # -----------------------------------------------------
+        # LOW RISK
+        # -----------------------------------------------------
 
         try:
 
-            result = tool_function(**arguments)
+            tool_function = TOOLS[tool]
+
+            result = self._execute_tool(
+                tool_function,
+                tool,
+                arguments
+            )
 
             log_action(
                 agent_id=agent_id,
                 session_id=session_id,
-                tool_name=tool_name,
+                action=tool,
                 arguments=arguments,
                 result=result,
                 status="success",
-                risk_level=inspection["risk_level"],
+                risk_level="low"
             )
 
-            return {
-                "success": True,
-                "blocked": False,
-                "result": result,
-                "risk_level": inspection["risk_level"],
-                "decision": inspection["decision"],
-                "reasons": inspection["reasons"],
-            }
-
-        # ----------------------------------------------------
-        # TOOL ERROR
-        # ----------------------------------------------------
+            return True, result
 
         except Exception as error:
+
+            error_message = str(error)
 
             log_action(
                 agent_id=agent_id,
                 session_id=session_id,
-                tool_name=tool_name,
+                action=tool,
                 arguments=arguments,
-                result=str(error),
+                result=error_message,
                 status="error",
-                risk_level=inspection["risk_level"],
+                risk_level="low"
             )
 
-            return {
-                "success": False,
-                "blocked": False,
-                "result": str(error),
-                "risk_level": inspection["risk_level"],
-                "decision": inspection["decision"],
-                "reasons": inspection["reasons"],
-            }
+            return False, (
+                f"Tool execution failed: "
+                f"{error_message}"
+            )
+        

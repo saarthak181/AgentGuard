@@ -6,90 +6,100 @@ from agent.tools import TOOLS
 from security.guard import AgentGuard
 
 
-# ============================================================
-# MODEL CONFIGURATION
-# ============================================================
-
 MODEL_NAME = "llama3.2:3b"
 
-
-# ============================================================
-# SYSTEM PROMPT
-# ============================================================
-
-SYSTEM_PROMPT = """
-You are AgentGuard's AI agent.
-
-You are a helpful multi-step AI agent.
-
-You have access to these tools:
-
-1. calculator
-   - Use this for mathematical calculations.
-   - Argument:
-     expression
-
-2. search_files
-   - Search documents for a keyword.
-   - Argument:
-     keyword
-
-3. read_file
-   - Read a document.
-   - Argument:
-     filename
-
-When you need a tool, respond ONLY with valid JSON:
-
-{
-    "action": "tool",
-    "tool": "tool_name",
-    "arguments": {
-        "argument_name": "value"
-    }
-}
-
-When you have enough information to answer the user, respond ONLY with:
-
-{
-    "action": "final",
-    "answer": "your answer"
-}
-
-Do not invent tool results.
-
-Use tools when necessary.
-
-You may use multiple tools to complete a task.
-"""
-
-
-# ============================================================
-# AGENT CLASS
-# ============================================================
 
 class Agent:
 
     def __init__(self):
 
         self.agent_id = "agent-001"
-
-        self.session_id = str(
-            uuid.uuid4()
-        )
-
+        self.session_id = str(uuid.uuid4())
         self.guard = AgentGuard()
+        self.messages = []
 
-        self.messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            }
-        ]
+    # =========================================================
+    # SYSTEM PROMPT
+    # =========================================================
 
-    # ========================================================
-    # CALL OLLAMA
-    # ========================================================
+    def _system_prompt(self):
+
+        return """
+You are AgentGuard's AI agent.
+
+You have ONLY these tools:
+
+1. calculator
+   Use for mathematical calculations.
+
+2. search_files
+   Use to search for files.
+
+3. read_file
+   Use to read a file.
+
+IMPORTANT RULES:
+
+- Never invent tools.
+- Never use Wikipedia.
+- Never use web search.
+- Never use browser tools.
+- Only use calculator, search_files, and read_file.
+
+If a tool is needed, return ONLY JSON.
+
+Tool format:
+
+{
+    "action": "tool",
+    "tool": "tool_name",
+    "arguments": {}
+}
+
+For calculator:
+
+{
+    "action": "tool",
+    "tool": "calculator",
+    "arguments": {
+        "expression": "33*44"
+    }
+}
+
+For search_files:
+
+{
+    "action": "tool",
+    "tool": "search_files",
+    "arguments": {
+        "query": "sales"
+    }
+}
+
+For read_file:
+
+{
+    "action": "tool",
+    "tool": "read_file",
+    "arguments": {
+        "filename": "sales_report.txt"
+    }
+}
+
+When you have enough information, return ONLY:
+
+{
+    "action": "final",
+    "answer": "your answer"
+}
+
+Do not repeatedly call the same tool.
+Do not search for a file after successfully reading it.
+"""
+
+    # =========================================================
+    # CALL LLM
+    # =========================================================
 
     def _call_llm(self):
 
@@ -103,201 +113,286 @@ class Agent:
 
         return response["message"]["content"]
 
-    # ========================================================
-    # EXECUTE TOOL THROUGH AGENTGUARD
-    # ========================================================
+    # =========================================================
+    # PARSE RESPONSE
+    # =========================================================
 
-    def _execute_tool(
-        self,
-        tool_name,
-        arguments,
-    ):
+    def _parse_response(self, response):
 
-        if tool_name not in TOOLS:
+        response = response.strip()
+
+        # Remove markdown code fences.
+        if response.startswith("```"):
+
+            lines = response.splitlines()
+
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+
+            response = "\n".join(lines).strip()
+
+        try:
+
+            data = json.loads(response)
+
+        except json.JSONDecodeError:
 
             return {
-                "success": False,
-                "blocked": False,
-                "result": f"Unknown tool: {tool_name}",
-                "risk_level": "unknown",
-                "decision": "deny",
-                "reasons": [
-                    "Unknown tool requested."
-                ],
+                "action": "error",
+                "message": "The AI returned invalid JSON.",
+                "raw_response": response
             }
 
-        tool = TOOLS[tool_name]
+        # -----------------------------------------------------
+        # NORMAL TOOL FORMAT
+        # -----------------------------------------------------
 
-        return self.guard.execute(
-            tool_function=tool,
-            agent_id=self.agent_id,
-            session_id=self.session_id,
-            tool_name=tool_name,
-            arguments=arguments,
-        )
+        if data.get("action") == "tool":
 
-    # ========================================================
+            tool_name = data.get("tool")
+
+            if tool_name not in TOOLS:
+
+                return {
+                    "action": "error",
+                    "message": (
+                        f"Invalid tool '{tool_name}'. "
+                        f"Available tools: "
+                        f"{', '.join(TOOLS.keys())}"
+                    )
+                }
+
+            return {
+                "action": "tool",
+                "tool": tool_name,
+                "arguments": data.get(
+                    "arguments",
+                    {}
+                )
+            }
+
+        # -----------------------------------------------------
+        # HANDLE:
+        #
+        # {
+        #     "action": "calculator",
+        #     ...
+        # }
+        # -----------------------------------------------------
+
+        if data.get("action") in TOOLS:
+
+            return {
+                "action": "tool",
+                "tool": data["action"],
+                "arguments": data.get(
+                    "arguments",
+                    {}
+                )
+            }
+
+        # -----------------------------------------------------
+        # FINAL ANSWER
+        # -----------------------------------------------------
+
+        if data.get("action") == "final":
+
+            return {
+                "action": "final",
+                "answer": data.get(
+                    "answer",
+                    "No answer available."
+                )
+            }
+
+        return {
+            "action": "error",
+            "message": (
+                f"Unknown agent action: "
+                f"{data.get('action')}"
+            )
+        }
+
+    # =========================================================
     # RUN AGENT
-    # ========================================================
+    # =========================================================
 
     def run(self, user_input):
 
-        self.messages.append(
+        self.session_id = str(uuid.uuid4())
+
+        self.messages = [
+            {
+                "role": "system",
+                "content": self._system_prompt()
+            },
             {
                 "role": "user",
                 "content": user_input
             }
-        )
+        ]
 
-        # Maximum number of actions for one task
-        MAX_STEPS = 10
+        max_steps = 10
 
-        for step in range(MAX_STEPS):
+        previous_tool = None
+        previous_arguments = None
 
-            response = self._call_llm()
+        for step in range(max_steps):
 
             print(
                 f"\n[Agent Step {step + 1}]"
             )
 
+            response = self._call_llm()
+
             print(response)
 
-            # ------------------------------------------------
-            # Parse model response
-            # ------------------------------------------------
+            decision = self._parse_response(
+                response
+            )
 
-            try:
+            # =================================================
+            # ERROR
+            # =================================================
 
-                decision = json.loads(response)
+            if decision["action"] == "error":
 
-            except json.JSONDecodeError:
+                return decision["message"]
 
-                return (
-                    "The model returned an invalid "
-                    "JSON response:\n"
-                    + response
-                )
-
-            action = decision.get("action")
-
-            # ------------------------------------------------
+            # =================================================
             # FINAL ANSWER
-            # ------------------------------------------------
+            # =================================================
 
-            if action == "final":
+            if decision["action"] == "final":
 
                 return decision.get(
                     "answer",
-                    "No answer provided."
+                    "No answer available."
                 )
 
-            # ------------------------------------------------
+            # =================================================
             # TOOL ACTION
-            # ------------------------------------------------
+            # =================================================
 
-            if action == "tool":
+            if decision["action"] == "tool":
 
-                tool_name = decision.get(
-                    "tool"
-                )
+                tool_name = decision["tool"]
 
                 arguments = decision.get(
                     "arguments",
                     {}
                 )
 
-                print(
-                    "\n[Tool Call]"
+                # -------------------------------------------------
+                # DETECT EXACT REPEATED TOOL CALL
+                # -------------------------------------------------
+
+                if (
+                    previous_tool == tool_name
+                    and previous_arguments == arguments
+                ):
+
+                    return (
+                        "The agent attempted to repeat "
+                        f"the same '{tool_name}' action "
+                        "multiple times."
+                    )
+
+                previous_tool = tool_name
+                previous_arguments = arguments
+
+                # -------------------------------------------------
+                # AGENTGUARD
+                # -------------------------------------------------
+
+                allowed, result = self.guard.execute(
+                    agent_id=self.agent_id,
+                    session_id=self.session_id,
+                    tool=tool_name,
+                    arguments=arguments
                 )
 
-                print(
-                    f"{tool_name}({arguments})"
-                )
+                # -------------------------------------------------
+                # BLOCKED / FAILED
+                # -------------------------------------------------
 
-                # --------------------------------------------
-                # AgentGuard
-                # --------------------------------------------
+                if not allowed:
 
-                tool_response = self._execute_tool(
-                    tool_name,
-                    arguments
-                )
+                    return (
+                        f"AgentGuard blocked the action "
+                        f"'{tool_name}'. "
+                        f"Reason: {result}"
+                    )
 
-                print(
-                    "\n[AgentGuard]"
-                )
+                # =================================================
+                # IMPORTANT:
+                # SUCCESSFUL FILE READ
+                # =================================================
 
-                print(
-                    f"Risk: "
-                    f"{tool_response['risk_level']}"
-                )
+                if tool_name == "read_file":
 
-                print(
-                    f"Decision: "
-                    f"{tool_response['decision']}"
-                )
+                    return result
 
-                if tool_response["reasons"]:
+                # =================================================
+                # CALCULATOR RESULT
+                # =================================================
 
-                    print("Reasons:")
+                if tool_name == "calculator":
 
-                    for reason in tool_response["reasons"]:
+                    self.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response
+                        }
+                    )
 
-                        print(
-                            f"- {reason}"
-                        )
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The calculator returned:\n\n"
+                                f"{result}\n\n"
+                                "Return the final answer now. "
+                                "Do not call another tool."
+                            )
+                        }
+                    )
 
-                print(
-                    "\n[Tool Result]"
-                )
+                    continue
 
-                print(
-                    tool_response["result"]
-                )
+                # =================================================
+                # SEARCH RESULT
+                # =================================================
 
-                # --------------------------------------------
-                # Add assistant decision to history
-                # --------------------------------------------
+                if tool_name == "search_files":
 
-                self.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response
-                    }
-                )
+                    self.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response
+                        }
+                    )
 
-                # --------------------------------------------
-                # Send AgentGuard result back to LLM
-                # --------------------------------------------
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The file search returned:\n\n"
+                                f"{result}\n\n"
+                                "If a relevant file was found, "
+                                "use read_file to read it. "
+                                "Do not search again using "
+                                "the same query."
+                            )
+                        }
+                    )
 
-                self.messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "AgentGuard processed your "
-                            "tool request.\n\n"
-                            f"Security result:\n"
-                            f"{json.dumps(tool_response)}\n\n"
-                            "Continue the task. "
-                            "If more tools are needed, "
-                            "request another tool. "
-                            "Otherwise provide the final answer."
-                        )
-                    }
-                )
-
-                continue
-
-            # ------------------------------------------------
-            # UNKNOWN ACTION
-            # ------------------------------------------------
-
-            return (
-                "Unknown agent action: "
-                f"{action}"
-            )
+                    continue
 
         return (
-            "Agent reached the maximum number "
-            "of allowed steps."
+            "Maximum agent steps reached "
+            "without a final answer."
         )

@@ -1,54 +1,39 @@
 import json
-from datetime import datetime, timezone
 from pathlib import Path
+from datetime import datetime
 
 
-# ============================================================
-# LOG CONFIGURATION
-# ============================================================
+LOG_FOLDER = Path("logs")
+LOG_FILE = LOG_FOLDER / "agent_actions.jsonl"
 
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-
-LOG_FILE = LOG_DIR / "agent_actions.jsonl"
-
-
-# ============================================================
-# ACTION LOGGER
-# ============================================================
 
 def log_action(
     agent_id,
     session_id,
-    tool_name,
+    action,
     arguments,
     result,
     status,
-    risk_level="unknown",
+    risk_level
 ):
     """
-    Store one agent action as a JSON Lines record.
+    Record one AgentGuard action in JSONL format.
     """
 
-    event = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+    LOG_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
         "agent_id": agent_id,
         "session_id": session_id,
-        "tool": tool_name,
+        "action": action,
         "arguments": arguments,
         "result": result,
         "status": status,
-        "risk_level": risk_level,
+        "risk_level": risk_level
     }
 
-    with open(
-        LOG_FILE,
-        "a",
-        encoding="utf-8"
-    ) as file:
-
+    with open(LOG_FILE, "a", encoding="utf-8") as file:
         file.write(
-            json.dumps(event) + "\n"
+            json.dumps(log_entry, ensure_ascii=False) + "\n"
         )
-
-    return event
