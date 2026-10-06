@@ -22,6 +22,7 @@ def _safe_eval(node):
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float)):
             return node.value
+
         raise ValueError("Only numbers are allowed.")
 
     if isinstance(node, ast.BinOp):
@@ -64,11 +65,15 @@ def calculator(expression: str):
 
 
 # ============================================================
-# FILE SEARCH
+# DOCUMENT DIRECTORY
 # ============================================================
 
 DOCUMENT_FOLDER = Path("data/documents")
 
+
+# ============================================================
+# FILE SEARCH
+# ============================================================
 
 def search_files(keyword: str):
     """
