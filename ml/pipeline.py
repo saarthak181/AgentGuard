@@ -1,0 +1,229 @@
+"""Train, compare, evaluate, and inspect behavioral classification models."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import platform
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import joblib
+import numpy as np
+import sklearn
+import xgboost
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import (average_precision_score, confusion_matrix, f1_score,
+                             precision_score, recall_score)
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.pipeline import Pipeline
+from xgboost import XGBClassifier
+
+from .dataset import ATTACK_FAMILIES, generate_dataset, read_jsonl, write_jsonl
+from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, feature_vector
+
+DEFAULT_DATASET = Path("ml/data/synthetic_traces.jsonl")
+DEFAULT_ARTIFACTS = Path("ml/artifacts")
+MODEL_VERSION = "agentguard-behavior-v1"
+
+
+def build_matrix(events: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str | None]]:
+    histories: dict[str, list[dict[str, Any]]] = {}
+    x, y, groups, families = [], [], [], []
+    for event in sorted(events, key=lambda e: (e["trace_id"], e["event_index"])):
+        sid = str(event["session_id"])
+        history = histories.setdefault(sid, [])
+        x.append(feature_vector(event, history))
+        y.append(int(event["label"]))
+        groups.append(str(event["trace_id"]))
+        families.append(event.get("trace_attack_family", event.get("attack_family")))
+        # Current outcome enters history only for subsequent observations.
+        history.append({"tool": event["tool"], "target_resource": event.get("target_resource"), "status": event["status"]})
+    return np.asarray(x, dtype=float), np.asarray(y, dtype=int), np.asarray(groups), families
+
+
+def _rule_baseline(features: np.ndarray) -> np.ndarray:
+    indexes = {name: i for i, name in enumerate(FEATURE_NAMES)}
+    positive = (features[:, indexes["sensitive_resource_indicator"]] > 0
+                ) | (features[:, indexes["external_communication_indicator"]] > 0
+                ) | (features[:, indexes["credential_exposure_indicator"]] > 0
+                ) | (features[:, indexes["prompt_injection_indicator"]] > 0
+                ) | (features[:, indexes["excessive_action_indicator"]] > 0
+                ) | (features[:, indexes["sensitive_then_external_indicator"]] > 0
+                ) | (features[:, indexes["repeated_call_count"]] >= 3
+                ) | (features[:, indexes["failed_action_count"]] >= 3)
+    return positive.astype(int)
+
+
+def _metrics(y_true: np.ndarray, pred: np.ndarray, probability: np.ndarray) -> dict[str, Any]:
+    tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+    return {
+        "precision": float(precision_score(y_true, pred, zero_division=0)),
+        "recall": float(recall_score(y_true, pred, zero_division=0)),
+        "f1": float(f1_score(y_true, pred, zero_division=0)),
+        "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
+        "false_positive_rate": float(fp / max(1, fp + tn)),
+        "pr_auc": float(average_precision_score(y_true, probability)) if len(np.unique(y_true)) > 1 else None,
+    }
+
+
+def split_by_trace(x: np.ndarray, y: np.ndarray, groups: np.ndarray,
+                   test_size: float = .25, seed: int = 2026) -> tuple[np.ndarray, np.ndarray]:
+    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    train_idx, test_idx = next(splitter.split(x, y, groups=groups))
+    if set(groups[train_idx]) & set(groups[test_idx]):
+        raise AssertionError("trace leakage across split")
+    return train_idx, test_idx
+
+
+def split_trace_partitions(x: np.ndarray, y: np.ndarray, groups: np.ndarray, seed: int = 2026,
+                           test_size: float = .2, validation_size: float = .2):
+    """Create disjoint train/validation/test sets grouped by trace, for model selection without test leakage."""
+    if not 0 < test_size < 1 or not 0 < validation_size < 1 or test_size + validation_size >= 1:
+        raise ValueError("test_size and validation_size must be positive and sum to less than 1")
+    all_indexes = np.arange(len(y))
+    first = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+    train_validation_idx, test_idx = next(first.split(x, y, groups=groups))
+    relative_validation_size = validation_size / (1 - test_size)
+    second = GroupShuffleSplit(n_splits=1, test_size=relative_validation_size, random_state=seed + 1)
+    train_rel, validation_rel = next(second.split(x[train_validation_idx], y[train_validation_idx],
+                                                   groups=groups[train_validation_idx]))
+    train_idx = train_validation_idx[train_rel]
+    validation_idx = train_validation_idx[validation_rel]
+    if (set(groups[train_idx]) & set(groups[validation_idx]) or
+            set(groups[train_idx]) & set(groups[test_idx]) or
+            set(groups[validation_idx]) & set(groups[test_idx])):
+        raise AssertionError("trace leakage across data partitions")
+    return train_idx, validation_idx, test_idx
+
+
+def train_and_evaluate(dataset_path: str | Path = DEFAULT_DATASET,
+                       artifact_dir: str | Path = DEFAULT_ARTIFACTS,
+                       seed: int = 2026, test_size: float = .25) -> dict[str, Any]:
+    dataset_path = Path(dataset_path)
+    if not dataset_path.exists():
+        events = generate_dataset(seed)
+        write_jsonl(events, dataset_path)
+    events = read_jsonl(dataset_path)
+    if not events or {int(item["label"]) for item in events} != {0, 1}:
+        raise ValueError("dataset must contain both normal (0) and malicious (1) labels")
+    x, y, groups, families = build_matrix(events)
+    train_idx, validation_idx, test_idx = split_trace_partitions(
+        x, y, groups, seed=seed, test_size=test_size, validation_size=.2)
+    if any(len(set(y[idx])) < 2 for idx in (train_idx, validation_idx, test_idx)):
+        raise ValueError("group split must contain both classes in training, validation, and test sets")
+    x_train, y_train = x[train_idx], y[train_idx]
+    negatives, positives = np.bincount(y_train, minlength=2)
+
+    models = {
+        "random_forest": Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("classifier", RandomForestClassifier(n_estimators=240, min_samples_leaf=2,
+                                                   class_weight="balanced_subsample", random_state=seed, n_jobs=1)),
+        ]),
+        "xgboost": Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("classifier", XGBClassifier(n_estimators=220, max_depth=4, learning_rate=.055,
+                                         subsample=.85, colsample_bytree=.9, reg_lambda=2,
+                                         scale_pos_weight=float(negatives / max(1, positives)),
+                                         objective="binary:logistic", eval_metric="logloss",
+                                         random_state=seed, n_jobs=1, verbosity=0)),
+        ]),
+    }
+    evaluations: dict[str, Any] = {}
+    validation_metrics: dict[str, Any] = {}
+    fitted = {}
+    for name, model in models.items():
+        model.fit(x_train, y_train)  # All preprocessing is fitted on training rows only.
+        validation_probability = model.predict_proba(x[validation_idx])[:, 1]
+        validation_pred = (validation_probability >= .5).astype(int)
+        validation_metrics[name] = _metrics(y[validation_idx], validation_pred, validation_probability)
+        test_probability = model.predict_proba(x[test_idx])[:, 1]
+        test_pred = (test_probability >= .5).astype(int)
+        evaluations[name] = _metrics(y[test_idx], test_pred, test_probability)
+        fitted[name] = model
+    validation_rule = _rule_baseline(x[validation_idx])
+    validation_metrics["rule_baseline"] = _metrics(y[validation_idx], validation_rule, validation_rule.astype(float))
+    test_rule = _rule_baseline(x[test_idx])
+    evaluations["rule_baseline"] = _metrics(y[test_idx], test_rule, test_rule.astype(float))
+    selected = max(("random_forest", "xgboost"),
+                   key=lambda name: (validation_metrics[name]["f1"], validation_metrics[name]["pr_auc"] or 0))
+
+    test_families = [families[i] for i in test_idx]
+    family_metrics = {}
+    selected_probability = fitted[selected].predict_proba(x[test_idx])[:, 1]
+    for family in ATTACK_FAMILIES:
+        mask = np.array([item == family for item in test_families], dtype=bool)
+        if mask.any():
+            pred = (selected_probability[mask] >= .5).astype(int)
+            family_metrics[family] = _metrics(y[test_idx][mask], pred, selected_probability[mask])
+            family_metrics[family]["support"] = int(mask.sum())
+        else:
+            family_metrics[family] = {"support": 0, "recall": None}
+
+    artifact_dir = Path(artifact_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    dataset_hash = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+    metadata = {
+        "model_version": MODEL_VERSION, "selected_model": selected, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_names": list(FEATURE_NAMES), "trained_at": datetime.now(timezone.utc).isoformat(),
+        "random_seed": seed, "dataset_path": str(dataset_path), "dataset_sha256": dataset_hash,
+        "dataset_events": len(events), "dataset_traces": len(set(groups)),
+        "train_traces": len(set(groups[train_idx])), "validation_traces": len(set(groups[validation_idx])),
+        "evaluation_traces": len(set(groups[test_idx])),
+        "train_events": len(train_idx), "validation_events": len(validation_idx), "evaluation_events": len(test_idx),
+        "class_counts_train": {"normal": int(negatives), "malicious": int(positives)},
+        "split_strategy": "GroupShuffleSplit by trace_id; all trace events stay in one partition",
+        "model_selection": "best Random Forest or XGBoost validation F1; final metrics use untouched test partition",
+        "preprocessing": "SimpleImputer(median), fitted on training partition only",
+        "versions": {"python": platform.python_version(), "scikit_learn": sklearn.__version__, "xgboost": xgboost.__version__},
+    }
+    bundle = {"estimator": fitted[selected], "model_version": MODEL_VERSION,
+              "selected_model": selected, "feature_schema_version": FEATURE_SCHEMA_VERSION,
+              "feature_names": list(FEATURE_NAMES), "metadata": metadata}
+    joblib.dump(bundle, artifact_dir / "model_bundle.joblib")
+    report = {"metadata": metadata, "selected_model": selected, "validation_metrics": validation_metrics,
+              "metrics": evaluations,
+              "per_attack_family": family_metrics, "threshold": .5,
+              "warning": "Synthetic-data evaluation only; does not establish real-world detection performance."}
+    (artifact_dir / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    (artifact_dir / "training_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    return report
+
+
+def inspect_artifact(artifact_dir: str | Path = DEFAULT_ARTIFACTS) -> dict[str, Any]:
+    artifact_dir = Path(artifact_dir)
+    bundle = joblib.load(artifact_dir / "model_bundle.joblib")
+    # Loading and checking the exact schema is also the backend's readiness contract.
+    if tuple(bundle.get("feature_names", ())) != FEATURE_NAMES or bundle.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+        raise ValueError("model artifact feature schema is incompatible")
+    return {key: bundle[key] for key in ("model_version", "selected_model", "feature_schema_version", "feature_names", "metadata")}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    train = sub.add_parser("train", help="train and evaluate models using a trace-aware split")
+    train.add_argument("--dataset", default=str(DEFAULT_DATASET))
+    train.add_argument("--artifact-dir", default=str(DEFAULT_ARTIFACTS))
+    train.add_argument("--seed", type=int, default=2026)
+    train.add_argument("--test-size", type=float, default=.25)
+    inspect = sub.add_parser("inspect", help="verify and summarize the selected model artifact")
+    inspect.add_argument("--artifact-dir", default=str(DEFAULT_ARTIFACTS))
+    evaluate = sub.add_parser("evaluate", help="print the persisted held-out evaluation report")
+    evaluate.add_argument("--artifact-dir", default=str(DEFAULT_ARTIFACTS))
+    args = parser.parse_args()
+    if args.command == "train":
+        print(json.dumps(train_and_evaluate(args.dataset, args.artifact_dir, args.seed, args.test_size), indent=2))
+    elif args.command == "inspect":
+        print(json.dumps(inspect_artifact(args.artifact_dir), indent=2))
+    else:
+        report_path = Path(args.artifact_dir) / "evaluation.json"
+        print(report_path.read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    main()

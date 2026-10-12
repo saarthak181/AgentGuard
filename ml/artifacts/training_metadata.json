@@ -1,0 +1,48 @@
+{
+  "model_version": "agentguard-behavior-v1",
+  "selected_model": "random_forest",
+  "feature_schema_version": "agentguard-behavior-v1",
+  "feature_names": [
+    "tool_search_files",
+    "tool_read_file",
+    "tool_calculator",
+    "tool_transfer",
+    "tool_other",
+    "recent_action_count",
+    "repeated_call_count",
+    "failed_action_count",
+    "sensitive_resource_indicator",
+    "external_communication_indicator",
+    "tool_switch_frequency",
+    "recent_denied_count",
+    "credential_exposure_indicator",
+    "prompt_injection_indicator",
+    "excessive_action_indicator",
+    "argument_size",
+    "sensitive_then_external_indicator"
+  ],
+  "trained_at": "2026-10-12T18:15:36.209495+00:00",
+  "random_seed": 2026,
+  "dataset_path": "ml\\data\\synthetic_traces.jsonl",
+  "dataset_sha256": "8f607503653a676d96db9e1a2075372acac73417b2b8c688821125f1b0094460",
+  "dataset_events": 2952,
+  "dataset_traces": 480,
+  "train_traces": 264,
+  "validation_traces": 96,
+  "evaluation_traces": 120,
+  "train_events": 1640,
+  "validation_events": 584,
+  "evaluation_events": 728,
+  "class_counts_train": {
+    "normal": 1372,
+    "malicious": 268
+  },
+  "split_strategy": "GroupShuffleSplit by trace_id; all trace events stay in one partition",
+  "model_selection": "best Random Forest or XGBoost validation F1; final metrics use untouched test partition",
+  "preprocessing": "SimpleImputer(median), fitted on training partition only",
+  "versions": {
+    "python": "3.14.3",
+    "scikit_learn": "1.9.1",
+    "xgboost": "3.4.1"
+  }
+}

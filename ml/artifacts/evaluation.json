@@ -1,0 +1,249 @@
+{
+  "metadata": {
+    "model_version": "agentguard-behavior-v1",
+    "selected_model": "random_forest",
+    "feature_schema_version": "agentguard-behavior-v1",
+    "feature_names": [
+      "tool_search_files",
+      "tool_read_file",
+      "tool_calculator",
+      "tool_transfer",
+      "tool_other",
+      "recent_action_count",
+      "repeated_call_count",
+      "failed_action_count",
+      "sensitive_resource_indicator",
+      "external_communication_indicator",
+      "tool_switch_frequency",
+      "recent_denied_count",
+      "credential_exposure_indicator",
+      "prompt_injection_indicator",
+      "excessive_action_indicator",
+      "argument_size",
+      "sensitive_then_external_indicator"
+    ],
+    "trained_at": "2026-10-12T18:15:36.209495+00:00",
+    "random_seed": 2026,
+    "dataset_path": "ml\\data\\synthetic_traces.jsonl",
+    "dataset_sha256": "8f607503653a676d96db9e1a2075372acac73417b2b8c688821125f1b0094460",
+    "dataset_events": 2952,
+    "dataset_traces": 480,
+    "train_traces": 264,
+    "validation_traces": 96,
+    "evaluation_traces": 120,
+    "train_events": 1640,
+    "validation_events": 584,
+    "evaluation_events": 728,
+    "class_counts_train": {
+      "normal": 1372,
+      "malicious": 268
+    },
+    "split_strategy": "GroupShuffleSplit by trace_id; all trace events stay in one partition",
+    "model_selection": "best Random Forest or XGBoost validation F1; final metrics use untouched test partition",
+    "preprocessing": "SimpleImputer(median), fitted on training partition only",
+    "versions": {
+      "python": "3.14.3",
+      "scikit_learn": "1.9.1",
+      "xgboost": "3.4.1"
+    }
+  },
+  "selected_model": "random_forest",
+  "validation_metrics": {
+    "random_forest": {
+      "precision": 0.8582677165354331,
+      "recall": 0.9732142857142857,
+      "f1": 0.9121338912133892,
+      "confusion_matrix": {
+        "tn": 454,
+        "fp": 18,
+        "fn": 3,
+        "tp": 109
+      },
+      "false_positive_rate": 0.038135593220338986,
+      "pr_auc": 0.9841417969206837
+    },
+    "xgboost": {
+      "precision": 0.8384615384615385,
+      "recall": 0.9732142857142857,
+      "f1": 0.9008264462809917,
+      "confusion_matrix": {
+        "tn": 451,
+        "fp": 21,
+        "fn": 3,
+        "tp": 109
+      },
+      "false_positive_rate": 0.04449152542372881,
+      "pr_auc": 0.9835263846924363
+    },
+    "rule_baseline": {
+      "precision": 0.36036036036036034,
+      "recall": 0.7142857142857143,
+      "f1": 0.47904191616766467,
+      "confusion_matrix": {
+        "tn": 330,
+        "fp": 142,
+        "fn": 32,
+        "tp": 80
+      },
+      "false_positive_rate": 0.3008474576271186,
+      "pr_auc": 0.3121947779482026
+    }
+  },
+  "metrics": {
+    "random_forest": {
+      "precision": 0.8421052631578947,
+      "recall": 0.9624060150375939,
+      "f1": 0.8982456140350877,
+      "confusion_matrix": {
+        "tn": 571,
+        "fp": 24,
+        "fn": 5,
+        "tp": 128
+      },
+      "false_positive_rate": 0.040336134453781515,
+      "pr_auc": 0.9752565624882357
+    },
+    "xgboost": {
+      "precision": 0.821656050955414,
+      "recall": 0.9699248120300752,
+      "f1": 0.8896551724137931,
+      "confusion_matrix": {
+        "tn": 567,
+        "fp": 28,
+        "fn": 4,
+        "tp": 129
+      },
+      "false_positive_rate": 0.047058823529411764,
+      "pr_auc": 0.9788576899383191
+    },
+    "rule_baseline": {
+      "precision": 0.38823529411764707,
+      "recall": 0.7443609022556391,
+      "f1": 0.5103092783505154,
+      "confusion_matrix": {
+        "tn": 439,
+        "fp": 156,
+        "fn": 34,
+        "tp": 99
+      },
+      "false_positive_rate": 0.26218487394957984,
+      "pr_auc": 0.3356904705201919
+    }
+  },
+  "per_attack_family": {
+    "sensitive_access": {
+      "precision": 1.0,
+      "recall": 0.7142857142857143,
+      "f1": 0.8333333333333334,
+      "confusion_matrix": {
+        "tn": 14,
+        "fp": 0,
+        "fn": 2,
+        "tp": 5
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 21
+    },
+    "credential_exposure": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 18,
+        "fp": 0,
+        "fn": 0,
+        "tp": 9
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 27
+    },
+    "external_transfer": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 20,
+        "fp": 0,
+        "fn": 0,
+        "tp": 10
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 30
+    },
+    "tool_misuse": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 16,
+        "fp": 0,
+        "fn": 0,
+        "tp": 8
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 24
+    },
+    "repeated_loop": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 44,
+        "fp": 0,
+        "fn": 0,
+        "tp": 26
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 70
+    },
+    "prompt_injection": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 36,
+        "fp": 0,
+        "fn": 0,
+        "tp": 12
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 48
+    },
+    "excessive_operations": {
+      "precision": 1.0,
+      "recall": 0.9333333333333333,
+      "f1": 0.9655172413793104,
+      "confusion_matrix": {
+        "tn": 72,
+        "fp": 0,
+        "fn": 3,
+        "tp": 42
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 0.9818578731058666,
+      "support": 117
+    },
+    "suspicious_sequence": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "confusion_matrix": {
+        "tn": 24,
+        "fp": 0,
+        "fn": 0,
+        "tp": 16
+      },
+      "false_positive_rate": 0.0,
+      "pr_auc": 1.0,
+      "support": 40
+    }
+  },
+  "threshold": 0.5,
+  "warning": "Synthetic-data evaluation only; does not establish real-world detection performance."
+}

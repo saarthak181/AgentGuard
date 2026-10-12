@@ -1,398 +1,119 @@
-import json
-import uuid
-import ollama
+"""Ollama-backed, explicit-tool agent loop."""
 
-from agent.tools import TOOLS
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from .tools import TOOL_REGISTRY
 from security.guard import AgentGuard
 
 
-MODEL_NAME = "llama3.2:3b"
+class AgentError(RuntimeError):
+    pass
+
+
+@dataclass
+class AgentResult:
+    answer: str
+    steps: int
+    tool_calls: list[dict[str, Any]]
+    completed: bool = True
 
 
 class Agent:
+    def __init__(self, model: str = "llama3.2:3b", max_steps: int = 8, timeout: float = 60,
+                 llm: Callable[[list[dict[str, str]]], str] | None = None,
+                 guard: AgentGuard | None = None):
+        if max_steps < 1:
+            raise ValueError("max_steps must be at least 1")
+        self.model, self.max_steps, self.timeout, self.llm = model, max_steps, timeout, llm
+        self.guard = guard or AgentGuard(TOOL_REGISTRY)
 
-    def __init__(self):
-
-        self.agent_id = "agent-001"
-        self.session_id = str(uuid.uuid4())
-        self.guard = AgentGuard()
-        self.messages = []
-
-    # =========================================================
-    # SYSTEM PROMPT
-    # =========================================================
-
-    def _system_prompt(self):
-
-        return """
-You are AgentGuard's AI agent.
-
-You have ONLY these tools:
-
-1. calculator
-   Use for mathematical calculations.
-
-2. search_files
-   Use to search for files.
-
-3. read_file
-   Use to read a file.
-
-IMPORTANT RULES:
-
-- Never invent tools.
-- Never use Wikipedia.
-- Never use web search.
-- Never use browser tools.
-- Only use calculator, search_files, and read_file.
-
-If a tool is needed, return ONLY JSON.
-
-Tool format:
-
-{
-    "action": "tool",
-    "tool": "tool_name",
-    "arguments": {}
-}
-
-For calculator:
-
-{
-    "action": "tool",
-    "tool": "calculator",
-    "arguments": {
-        "expression": "33*44"
-    }
-}
-
-For search_files:
-
-{
-    "action": "tool",
-    "tool": "search_files",
-    "arguments": {
-        "query": "sales"
-    }
-}
-
-For read_file:
-
-{
-    "action": "tool",
-    "tool": "read_file",
-    "arguments": {
-        "filename": "sales_report.txt"
-    }
-}
-
-When you have enough information, return ONLY:
-
-{
-    "action": "final",
-    "answer": "your answer"
-}
-
-Do not repeatedly call the same tool.
-Do not search for a file after successfully reading it.
-"""
-
-    # =========================================================
-    # CALL LLM
-    # =========================================================
-
-    def _call_llm(self):
-
-        response = ollama.chat(
-            model=MODEL_NAME,
-            messages=self.messages,
-            options={
-                "temperature": 0
-            }
-        )
-
-        return response["message"]["content"]
-
-    # =========================================================
-    # PARSE RESPONSE
-    # =========================================================
-
-    def _parse_response(self, response):
-
-        response = response.strip()
-
-        # Remove markdown code fences.
-        if response.startswith("```"):
-
-            lines = response.splitlines()
-
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-
-            response = "\n".join(lines).strip()
-
+    def _request(self, messages: list[dict[str, str]]) -> str:
+        if self.llm:
+            return self.llm(messages)
         try:
+            import ollama
+        except ImportError as exc:
+            raise AgentError("Ollama Python package is missing. Install requirements.txt.") from exc
+        try:
+            client = ollama.Client(timeout=self.timeout)
+            response = client.chat(model=self.model, messages=messages, format="json", options={"num_predict": 512})
+        except Exception as exc:
+            text = str(exc)
+            if "timeout" in text.lower() or isinstance(exc, TimeoutError):
+                raise AgentError(f"Ollama request timed out after {self.timeout:g} seconds.") from exc
+            if "not found" in text.lower() or "model" in text.lower() and "pull" in text.lower():
+                raise AgentError(f"Ollama model '{self.model}' is unavailable. Run: ollama pull {self.model}") from exc
+            raise AgentError(f"Cannot reach Ollama. Start Ollama and verify the model '{self.model}' is installed. Details: {exc}") from exc
+        if isinstance(response, dict):
+            return response.get("message", {}).get("content", "")
+        return response.message.content
 
-            data = json.loads(response)
-
-        except json.JSONDecodeError:
-
-            return {
-                "action": "error",
-                "message": "The AI returned invalid JSON.",
-                "raw_response": response
-            }
-
-        # -----------------------------------------------------
-        # NORMAL TOOL FORMAT
-        # -----------------------------------------------------
-
-        if data.get("action") == "tool":
-
-            tool_name = data.get("tool")
-
-            if tool_name not in TOOLS:
-
-                return {
-                    "action": "error",
-                    "message": (
-                        f"Invalid tool '{tool_name}'. "
-                        f"Available tools: "
-                        f"{', '.join(TOOLS.keys())}"
-                    )
-                }
-
-            return {
-                "action": "tool",
-                "tool": tool_name,
-                "arguments": data.get(
-                    "arguments",
-                    {}
-                )
-            }
-
-        # -----------------------------------------------------
-        # HANDLE:
-        #
-        # {
-        #     "action": "calculator",
-        #     ...
-        # }
-        # -----------------------------------------------------
-
-        if data.get("action") in TOOLS:
-
-            return {
-                "action": "tool",
-                "tool": data["action"],
-                "arguments": data.get(
-                    "arguments",
-                    {}
-                )
-            }
-
-        # -----------------------------------------------------
-        # FINAL ANSWER
-        # -----------------------------------------------------
-
-        if data.get("action") == "final":
-
-            return {
-                "action": "final",
-                "answer": data.get(
-                    "answer",
-                    "No answer available."
-                )
-            }
-
-        return {
-            "action": "error",
-            "message": (
-                f"Unknown agent action: "
-                f"{data.get('action')}"
-            )
-        }
-
-    # =========================================================
-    # RUN AGENT
-    # =========================================================
-
-    def run(self, user_input):
-
-        self.session_id = str(uuid.uuid4())
-
-        self.messages = [
-            {
-                "role": "system",
-                "content": self._system_prompt()
-            },
-            {
-                "role": "user",
-                "content": user_input
-            }
-        ]
-
-        max_steps = 10
-
-        previous_tool = None
-        previous_arguments = None
-
-        for step in range(max_steps):
-
-            print(
-                f"\n[Agent Step {step + 1}]"
-            )
-
-            response = self._call_llm()
-
-            print(response)
-
-            decision = self._parse_response(
-                response
-            )
-
-            # =================================================
-            # ERROR
-            # =================================================
-
-            if decision["action"] == "error":
-
-                return decision["message"]
-
-            # =================================================
-            # FINAL ANSWER
-            # =================================================
-
-            if decision["action"] == "final":
-
-                return decision.get(
-                    "answer",
-                    "No answer available."
-                )
-
-            # =================================================
-            # TOOL ACTION
-            # =================================================
-
-            if decision["action"] == "tool":
-
-                tool_name = decision["tool"]
-
-                arguments = decision.get(
-                    "arguments",
-                    {}
-                )
-
-                # -------------------------------------------------
-                # DETECT EXACT REPEATED TOOL CALL
-                # -------------------------------------------------
-
-                if (
-                    previous_tool == tool_name
-                    and previous_arguments == arguments
-                ):
-
-                    return (
-                        "The agent attempted to repeat "
-                        f"the same '{tool_name}' action "
-                        "multiple times."
-                    )
-
-                previous_tool = tool_name
-                previous_arguments = arguments
-
-                # -------------------------------------------------
-                # AGENTGUARD
-                # -------------------------------------------------
-
-                allowed, result = self.guard.execute(
-                    agent_id=self.agent_id,
-                    session_id=self.session_id,
-                    tool=tool_name,
-                    arguments=arguments
-                )
-
-                # -------------------------------------------------
-                # BLOCKED / FAILED
-                # -------------------------------------------------
-
-                if not allowed:
-
-                    return (
-                        f"AgentGuard blocked the action "
-                        f"'{tool_name}'. "
-                        f"Reason: {result}"
-                    )
-
-                # =================================================
-                # IMPORTANT:
-                # SUCCESSFUL FILE READ
-                # =================================================
-
-                if tool_name == "read_file":
-
-                    return result
-
-                # =================================================
-                # CALCULATOR RESULT
-                # =================================================
-
-                if tool_name == "calculator":
-
-                    self.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response
-                        }
-                    )
-
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The calculator returned:\n\n"
-                                f"{result}\n\n"
-                                "Return the final answer now. "
-                                "Do not call another tool."
-                            )
-                        }
-                    )
-
-                    continue
-
-                # =================================================
-                # SEARCH RESULT
-                # =================================================
-
-                if tool_name == "search_files":
-
-                    self.messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response
-                        }
-                    )
-
-                    self.messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "The file search returned:\n\n"
-                                f"{result}\n\n"
-                                "If a relevant file was found, "
-                                "use read_file to read it. "
-                                "Do not search again using "
-                                "the same query."
-                            )
-                        }
-                    )
-
-                    continue
-
-        return (
-            "Maximum agent steps reached "
-            "without a final answer."
-        )
+    def run(self, task: str) -> AgentResult:
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("task must be a non-empty string")
+        tool_list = [{"name": name, "description": spec["description"], "parameters": spec["parameters"]}
+                     for name, spec in TOOL_REGISTRY.items()]
+        messages = [{"role": "system", "content": (
+            "You are AgentGuard, a local assistant. Choose only listed tools. Never invent tools. "
+            "Reply with JSON exactly: {\"action\":\"tool\",\"name\":...,\"arguments\":{...}} "
+            "or {\"action\":\"final\",\"answer\":...}. Use concise tool results and do not repeat completed calls. "
+            f"Available tools: {json.dumps(tool_list)}")}, {"role": "user", "content": task}]
+        calls: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        seen = set()
+        for step in range(1, self.max_steps + 1):
+            try:
+                raw = self._request(messages)
+                decision = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                messages.append({"role": "assistant", "content": str(raw)})
+                messages.append({"role": "user", "content": f"Malformed JSON ({exc}). Return one valid decision JSON object."})
+                continue
+            except AgentError:
+                raise
+            except TimeoutError as exc:
+                raise AgentError(f"Ollama request timed out after {self.timeout:g} seconds.") from exc
+            except Exception as exc:
+                detail = str(exc)
+                lowered = detail.lower()
+                if isinstance(exc, (ConnectionError, OSError)) or "connection refused" in lowered or "connecterror" in lowered:
+                    message = f"Cannot reach Ollama. Start Ollama and verify the model '{self.model}' is installed. Details: {detail}"
+                elif "not found" in lowered or "pull it" in lowered:
+                    message = f"Ollama model '{self.model}' is unavailable. Run: ollama pull {self.model}"
+                elif "timeout" in lowered:
+                    message = f"Ollama request timed out after {self.timeout:g} seconds."
+                else:
+                    message = f"LLM request failed: {detail}"
+                raise AgentError(message) from exc
+            if not isinstance(decision, dict):
+                messages.append({"role": "user", "content": "Response must be a JSON object. Try again."})
+                continue
+            if decision.get("action") == "final" and isinstance(decision.get("answer"), str):
+                return AgentResult(decision["answer"], step, calls, True)
+            name, args = decision.get("name"), decision.get("arguments")
+            if decision.get("action") != "tool":
+                messages.append({"role": "user", "content": "Use action 'tool' or 'final' and provide a valid response."})
+                continue
+            key = json.dumps([name, args], sort_keys=True, default=str)
+            tool_key = name if isinstance(name, str) else str(name)
+            counts[tool_key] = counts.get(tool_key, 0) + 1
+            if key in seen or counts[tool_key] > 3:
+                execution = self.guard.execute(name, args, forced_block_reason="Repeated tool call stopped to prevent a loop.")
+            else:
+                seen.add(key)
+                execution = self.guard.execute(name, args)
+            result = execution.result if execution.status == "allowed" else {"error": execution.error or execution.reason}
+            if not execution.audit_persisted:
+                result = {"error": "Action execution stopped because audit persistence failed.", "details": execution.error}
+            call = {"name": name, "arguments": args, "result": result,
+                    "execution": execution.to_dict()}
+            calls.append(call)
+            messages.extend([{"role": "assistant", "content": json.dumps(decision)},
+                             {"role": "tool", "content": json.dumps(result, ensure_ascii=False)}])
+            if not execution.audit_persisted:
+                return AgentResult("The action could not be audited, so I stopped the task.", step, calls)
+        return AgentResult("I couldn't complete the task within the allowed number of steps.", self.max_steps, calls, False)
