@@ -24,6 +24,7 @@ class ActionOut(BaseModel):
     risk_score: int | None = None
     risk_probability: float | None = None
     model_version: str | None = None
+    assessment: dict | None = None
     related_action_id: str | None = None
     approval_id: str | None = None
 

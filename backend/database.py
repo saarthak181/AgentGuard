@@ -50,7 +50,7 @@ def init_db() -> None:
     # Additive SQLite migration for Phase 2 databases; existing actions are kept intact.
     if _engine.dialect.name in {"sqlite", "postgresql"}:
         columns = {item["name"] for item in inspect(_engine).get_columns("actions")}
-        additions = {"risk_score": "INTEGER", "risk_probability": "FLOAT", "model_version": "VARCHAR(100)", "task_id": "VARCHAR(36)",
+        additions = {"risk_score": "INTEGER", "risk_probability": "FLOAT", "model_version": "VARCHAR(100)", "assessment_json": "TEXT", "task_id": "VARCHAR(36)",
                      "executed": "BOOLEAN NOT NULL DEFAULT FALSE",
                      "related_action_id": "VARCHAR(36)", "approval_id": "VARCHAR(36)"}
         with _engine.begin() as connection:
@@ -91,7 +91,7 @@ def persist_action(entry: dict[str, Any]) -> None:
             result_summary=str(entry["result_summary"]), status=entry["status"],
             decision=entry["decision"], reason=entry["reason"], duration_ms=entry["duration_ms"],
             risk_score=entry.get("risk_score"), risk_probability=entry.get("risk_probability"),
-            model_version=entry.get("model_version"), related_action_id=entry.get("related_action_id"),
+            model_version=entry.get("model_version"), assessment_json=json.dumps(entry.get("assessment"), ensure_ascii=False) if entry.get("assessment") is not None else None, related_action_id=entry.get("related_action_id"),
             approval_id=entry.get("approval_id"),
         )
         session.add(action)

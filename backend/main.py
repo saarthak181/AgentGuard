@@ -21,7 +21,8 @@ from agent.tools import TOOL_REGISTRY
 from security.guard import AgentGuard
 from security.logger import redact
 
-app = FastAPI(title="AgentGuard API", version="3.0.0", description="Local agent security, audit, behavioral risk, and human review API.")
+APP_VERSION = "5.0.0"
+app = FastAPI(title="AgentGuard API", version=APP_VERSION, description="Local agent security, audit, behavioral risk, and human review API.")
 runtime_guard = AgentGuard(TOOL_REGISTRY)
 
 
@@ -79,7 +80,7 @@ def _task_detail(db: Session, row: TaskRecord) -> TaskDetail:
         session_id=item.session_id, task_id=item.task_id, executed=item.executed, tool=item.tool, arguments=json.loads(item.arguments_json),
         target_resource=item.target_resource, result_summary=item.result_summary, status=item.status,
         decision=item.decision, reason=item.reason, duration_ms=item.duration_ms,
-        risk_score=item.risk_score, risk_probability=item.risk_probability, model_version=item.model_version,
+        risk_score=item.risk_score, risk_probability=item.risk_probability, model_version=item.model_version, assessment=json.loads(item.assessment_json) if item.assessment_json else None,
         related_action_id=item.related_action_id, approval_id=item.approval_id) for item in records]
     event_rows = db.execute(select(SecurityEvent, ActionRecord).join(
         ActionRecord, SecurityEvent.action_id == ActionRecord.action_id).where(
@@ -101,7 +102,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_frontend_origins, allow_creden
 
 @app.get("/")
 def root():
-    return {"name": "AgentGuard", "version": "2.0.0", "docs": "/docs"}
+    return {"name": "AgentGuard", "version": APP_VERSION, "docs": "/docs"}
 
 
 @app.get("/health")
@@ -171,7 +172,7 @@ def task_actions(task_id: str, limit: int = Query(50, ge=1, le=200),
             session_id=r.session_id, task_id=r.task_id, executed=r.executed, tool=r.tool, arguments=json.loads(r.arguments_json),
             target_resource=r.target_resource, result_summary=r.result_summary, status=r.status,
             decision=r.decision, reason=r.reason, duration_ms=r.duration_ms, risk_score=r.risk_score,
-            risk_probability=r.risk_probability, model_version=r.model_version,
+            risk_probability=r.risk_probability, model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
             related_action_id=r.related_action_id, approval_id=r.approval_id) for r in rows]
         return ActionsPage(items=items, total=total, limit=limit, offset=offset)
     except (SQLAlchemyError, ValueError) as exc:
@@ -212,7 +213,7 @@ def actions(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                                    target_resource=item.target_resource, result_summary=item.result_summary,
                                    status=item.status, decision=item.decision, reason=item.reason, duration_ms=item.duration_ms,
                                    risk_score=item.risk_score, risk_probability=item.risk_probability,
-                                   model_version=item.model_version, related_action_id=item.related_action_id,
+                                    model_version=item.model_version, assessment=json.loads(item.assessment_json) if item.assessment_json else None, related_action_id=item.related_action_id,
                                    approval_id=item.approval_id))
         return ActionsPage(items=items, total=total, limit=limit, offset=offset)
     except (SQLAlchemyError, ValueError) as exc:
@@ -273,7 +274,7 @@ def session_actions(session_id: str, limit: int = Query(50, ge=1, le=200), offse
         return ActionsPage(items=[ActionOut(action_id=r.action_id, timestamp=r.timestamp, agent_id=r.agent_id,
             session_id=r.session_id, task_id=r.task_id, executed=r.executed, tool=r.tool, arguments=json.loads(r.arguments_json), target_resource=r.target_resource,
             result_summary=r.result_summary, status=r.status, decision=r.decision, reason=r.reason, duration_ms=r.duration_ms,
-            risk_score=r.risk_score, risk_probability=r.risk_probability, model_version=r.model_version,
+            risk_score=r.risk_score, risk_probability=r.risk_probability, model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
             related_action_id=r.related_action_id, approval_id=r.approval_id) for r in records], total=total, limit=limit, offset=offset)
     except (SQLAlchemyError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="session actions unavailable") from exc

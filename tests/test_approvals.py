@@ -34,6 +34,11 @@ class FixedPredictor:
 
 def make_guard(tmp_path, predictor=None, tool=None, ttl=60):
     spec = dict(TOOL_REGISTRY["calculator"])
+    # These tests exercise the approval lifecycle using a harmless stand-in
+    # for a high-impact operation.  Production calculator metadata remains
+    # low risk and is not reviewed for ordinary arithmetic.
+    spec["minimum_decision"] = "REVIEW"
+    spec["inherent_risk"] = 75
     if tool is not None:
         spec["function"] = tool
     return AgentGuard({"calculator": spec}, AuditLogger(tmp_path / "agent_actions.jsonl", persist=persist_action),

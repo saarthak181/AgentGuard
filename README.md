@@ -2,11 +2,13 @@
 
 AgentGuard is a local, tool-using Python agent with a FastAPI security backend and a Next.js dashboard. The agent can use only the registered `search_files`, `read_file`, and `calculator` tools. All tool requests pass through `AgentGuard`, deterministic mandatory rules, model-backed risk policy, human review where required, and append-only audit persistence before an allowed action is executed. Blocking remains entirely in the backend; the dashboard is an observer and reviewer client.
 
+For a presentation-ready local launch, use [the presentation runbook](docs/PRESENTATION.md). It provides one-command setup and startup scripts, a preflight check, expected demo outcomes, and troubleshooting. Use this repository at `C:\Users\ssaar\Documents\ChatGPT\AgentGuard`; do not run an older checkout from `Desktop\Agentguard`.
+
 The behavioral model is a provisional synthetic-data model. Do not interpret its score or synthetic evaluation as calibrated or established real-world performance. Phase 4 does not add Claude Code, MCP, or Comet integrations.
 
 ## Architecture and API
 
-- `agent/`: Ollama agent and constrained tool registry.
+- `agent/`: Ollama agent with schema-constrained JSON decisions and an explicit tool registry. Tool calls require their exact declared argument names and are re-prompted after validation failures.
 - `security/`: execution boundary, mandatory rules, risk decision, approval revalidation, and redacted JSONL logger.
 - `ml/`: trace-aware synthetic data, training/evaluation, trusted model artifact loading, and policy thresholds.
 - `backend/`: FastAPI routes and additive SQLAlchemy/SQLite persistence.

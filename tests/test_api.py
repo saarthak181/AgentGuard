@@ -23,7 +23,8 @@ def test_database_initializes_cleanly_and_health_works():
 def test_root_and_actions_api():
     add("api-1", "calculator", "allowed")
     client = TestClient(app)
-    assert client.get("/").status_code == 200
+    root = client.get("/")
+    assert root.status_code == 200 and root.json()["version"] == app.version
     response = client.get("/actions")
     assert response.status_code == 200 and response.json()["total"] == 1
     assert response.json()["items"][0]["action_id"] == "api-1"

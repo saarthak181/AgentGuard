@@ -22,7 +22,7 @@
       "argument_size",
       "sensitive_then_external_indicator"
     ],
-    "trained_at": "2026-10-12T18:15:36.209495+00:00",
+    "trained_at": "2026-10-24T11:15:07.714356+00:00",
     "random_seed": 2026,
     "dataset_path": "ml\\data\\synthetic_traces.jsonl",
     "dataset_sha256": "8f607503653a676d96db9e1a2075372acac73417b2b8c688821125f1b0094460",

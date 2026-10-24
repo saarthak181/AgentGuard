@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 import pytest
 
@@ -33,14 +35,66 @@ def test_unknown_tool_and_invalid_arguments_recover():
 
 def test_repeated_call_stopped():
     decision = response({"action": "tool", "name": "calculator", "arguments": {"expression": "1+1"}})
-    result = Agent(max_steps=3, llm=scripted(decision, decision, response({"action": "final", "answer": "done"}))).run("go")
+    remaining = iter((decision, decision, response({"action": "final", "answer": "done"})))
+    requests = []
+
+    def llm(_messages):
+        requests.append(True)
+        return next(remaining)
+
+    result = Agent(max_steps=3, llm=llm).run("go")
     assert "Repeated" in result.tool_calls[1]["result"]["error"]
+    assert result.completed is False
+    assert "new task" in result.answer
+    assert len(requests) == 2
 
 
 def test_max_step_enforcement():
-    decision = response({"action": "tool", "name": "calculator", "arguments": {"expression": "1+1"}})
-    result = Agent(max_steps=2, llm=scripted(decision, decision, decision)).run("go")
+    first = response({"action": "tool", "name": "calculator", "arguments": {"expression": "1+1"}})
+    second = response({"action": "tool", "name": "calculator", "arguments": {"expression": "2+2"}})
+    result = Agent(max_steps=2, llm=scripted(first, second, second)).run("go")
     assert result.steps == 2 and "allowed number" in result.answer
+
+
+def test_missing_arguments_are_corrected_and_retried():
+    prompts = []
+    responses = iter([
+        response({"action": "tool", "name": "calculator"}),
+        response({"action": "tool", "name": "calculator", "arguments": {"expression": "44*55"}}),
+        response({"action": "final", "answer": "2420"}),
+    ])
+
+    def llm(messages):
+        prompts.append(list(messages))
+        return next(responses)
+
+    result = Agent(llm=llm).run("Calculate 44 times 55.")
+    assert [call["execution"]["status"] for call in result.tool_calls] == ["blocked", "allowed"]
+    assert result.answer == "2420"
+    assert prompts[1][-1]["role"] == "user"
+    assert "did not execute it" in prompts[1][-1]["content"]
+    assert '"expression":"44*55"' in prompts[1][-1]["content"]
+
+
+def test_ollama_receives_tool_specific_json_schema(monkeypatch):
+    captured = {}
+
+    class Client:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        def chat(self, **kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(message=types.SimpleNamespace(content='{"action":"final","answer":"ok"}'))
+
+    monkeypatch.setitem(sys.modules, "ollama", types.SimpleNamespace(Client=Client))
+    assert Agent(timeout=12)._request([{"role": "user", "content": "test"}]).endswith('"answer":"ok"}')
+    schema = captured["format"]
+    calculator = next(item for item in schema["anyOf"]
+                      if item["properties"].get("name", {}).get("enum") == ["calculator"])
+    assert calculator["required"] == ["action", "name", "arguments"]
+    assert calculator["properties"]["arguments"]["required"] == ["expression"]
+    assert calculator["properties"]["arguments"]["additionalProperties"] is False
 
 
 def test_tool_error_recovery():

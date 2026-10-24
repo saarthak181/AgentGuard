@@ -1,0 +1,8 @@
+Sales Report
+
+January: 12000
+February: 15000
+March: 18000
+April: 21000
+
+Regional summary: North India recorded the highest sales.

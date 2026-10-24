@@ -80,3 +80,25 @@ def test_audit_failure_is_explicit_in_execution_result(tmp_path):
     result = guard.execute("effect", {})
     assert calls == [] and result.status == "blocked"
     assert result.audit_persisted is False and "pre-execution audit failed" in result.error
+
+
+def test_safe_calculator_has_low_hybrid_risk(tmp_path):
+    class BenignPredictor:
+        def predict(self, *_args):
+            return {"risk_score": 0, "probability": 0.0, "model_version": "test"}
+
+    guard = AgentGuard(TOOL_REGISTRY, AuditLogger(tmp_path / "actions.jsonl"), predictor=BenignPredictor())
+    result = guard.execute("calculator", {"expression": "25*4"})
+    assert result.status == "allowed" and result.risk_score == 0
+
+
+def test_side_effect_policy_requires_review_even_with_low_ml_signal(tmp_path):
+    from backend.database import persist_action
+    class BenignPredictor:
+        def predict(self, *_args):
+            return {"risk_score": 0, "probability": 0.0, "model_version": "test"}
+
+    tool = {"write": {"function": lambda value: value, "parameters": {"value": "string"},
+                       "minimum_decision": "REVIEW", "inherent_risk": 75}}
+    result = AgentGuard(tool, AuditLogger(tmp_path / "actions.jsonl", persist=persist_action), predictor=BenignPredictor()).execute("write", {"value": "x"})
+    assert result.status == "review_required" and result.executed is False

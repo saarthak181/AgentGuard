@@ -31,6 +31,37 @@ class Agent:
         self.model, self.max_steps, self.timeout, self.llm = model, max_steps, timeout, llm
         self.guard = guard or AgentGuard(TOOL_REGISTRY)
 
+    def _decision_schema(self) -> dict[str, Any]:
+        """Bind each model tool decision to the exact argument schema the guard accepts."""
+        variants = []
+        for name, spec in self.guard.tools.items():
+            parameters = spec.get("parameters", {})
+            variants.append({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["tool"]},
+                    "name": {"type": "string", "enum": [name]},
+                    "arguments": {
+                        "type": "object",
+                        "properties": {key: {"type": "string"} for key in parameters},
+                        "required": list(parameters),
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["action", "name", "arguments"],
+                "additionalProperties": False,
+            })
+        variants.append({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["final"]},
+                "answer": {"type": "string"},
+            },
+            "required": ["action", "answer"],
+            "additionalProperties": False,
+        })
+        return {"type": "object", "anyOf": variants}
+
     def _request(self, messages: list[dict[str, str]]) -> str:
         if self.llm:
             return self.llm(messages)
@@ -40,7 +71,8 @@ class Agent:
             raise AgentError("Ollama Python package is missing. Install requirements.txt.") from exc
         try:
             client = ollama.Client(timeout=self.timeout)
-            response = client.chat(model=self.model, messages=messages, format="json", options={"num_predict": 512})
+            response = client.chat(model=self.model, messages=messages, format=self._decision_schema(),
+                                   options={"num_predict": 512})
         except Exception as exc:
             text = str(exc)
             if "timeout" in text.lower() or isinstance(exc, TimeoutError):
@@ -56,12 +88,17 @@ class Agent:
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task must be a non-empty string")
         tool_list = [{"name": name, "description": spec["description"], "parameters": spec["parameters"]}
-                     for name, spec in TOOL_REGISTRY.items()]
+                     for name, spec in self.guard.tools.items()]
+        schema = self._decision_schema()
         messages = [{"role": "system", "content": (
             "You are AgentGuard, a local assistant. Choose only listed tools. Never invent tools. "
             "Reply with JSON exactly: {\"action\":\"tool\",\"name\":...,\"arguments\":{...}} "
-            "or {\"action\":\"final\",\"answer\":...}. Use concise tool results and do not repeat completed calls. "
-            f"Available tools: {json.dumps(tool_list)}")}, {"role": "user", "content": task}]
+            "or {\"action\":\"final\",\"answer\":...}. Every tool call MUST include a non-null arguments object "
+            "with exactly the listed keys and string values. For calculator, use "
+            "{\"action\":\"tool\",\"name\":\"calculator\",\"arguments\":{\"expression\":\"44*55\"}}. "
+            "Never omit arguments, use null, or put arguments beside the arguments object. Do not repeat completed calls. "
+            f"Available tools: {json.dumps(tool_list)}. Required output schema: {json.dumps(schema)}")},
+                    {"role": "user", "content": task}]
         calls: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
         seen = set()
@@ -112,8 +149,25 @@ class Agent:
             call = {"name": name, "arguments": args, "result": result,
                     "execution": execution.to_dict()}
             calls.append(call)
-            messages.extend([{"role": "assistant", "content": json.dumps(decision)},
-                             {"role": "tool", "content": json.dumps(result, ensure_ascii=False)}])
             if not execution.audit_persisted:
+                messages.extend([{"role": "assistant", "content": json.dumps(decision)},
+                                 {"role": "user", "content": "The action could not be audited, so it was not run. Stop and report this."}])
                 return AgentResult("The action could not be audited, so I stopped the task.", step, calls)
+            if execution.status == "blocked":
+                if execution.reason == "Repeated tool call stopped to prevent a loop.":
+                    return AgentResult(
+                        "I stopped because the model repeated a tool call. No calculator action was run for that repeated call. "
+                        "Please submit the calculation again as a new task.", step, calls, False)
+                feedback = (
+                    f"AgentGuard blocked the {name} call and did not execute it. Reason: {execution.error or execution.reason}. "
+                    "Correct the call using the exact required argument names and string values. "
+                    "For calculator, send arguments as {\"expression\":\"44*55\"}. "
+                    "Do not repeat the rejected call; if you cannot form a valid call, return a final explanation."
+                )
+            else:
+                feedback = (f"AgentGuard {execution.status} the {name} call. "
+                            f"Result: {json.dumps(result, ensure_ascii=False)}. "
+                            "Use this result to answer or continue only if another distinct tool call is needed.")
+            messages.extend([{"role": "assistant", "content": json.dumps(decision)},
+                             {"role": "user", "content": feedback}])
         return AgentResult("I couldn't complete the task within the allowed number of steps.", self.max_steps, calls, False)

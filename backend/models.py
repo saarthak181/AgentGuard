@@ -44,6 +44,7 @@ class ActionRecord(Base):
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     risk_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    assessment_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     related_action_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 

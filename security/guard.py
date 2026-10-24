@@ -16,6 +16,7 @@ from ml.policy import RiskThresholds
 from ml.predictor import RiskPredictor, RiskUnavailable
 from .logger import AuditLogError, AuditLogger
 from .rules import mandatory_denial
+from .risk import assess
 
 
 @dataclass
@@ -88,16 +89,30 @@ class AgentGuard:
             return self._finish(action_id, tool, arguments, target, "blocked", "block", reason or error,
                                 None, started, error=error, risk=risk)
 
-        score = risk["risk_score"]
-        decision = self.thresholds.classify(score)
+        assessment = assess(tool, spec, arguments, history, risk)
+        score = assessment["final_risk_score"]
+        # Persist the authoritative hybrid indicator.  The original model
+        # output remains available as risk_probability and in the explanation.
+        risk = {**risk, "risk_score": score, "assessment": assessment}
+        behavioral_decision = self.thresholds.classify(score)
+        inherent_decision = str(spec.get("minimum_decision", "ALLOW")).upper()
+        if inherent_decision not in {"ALLOW", "REVIEW", "BLOCK"}:
+            return self._finish(action_id, tool, arguments, target, "blocked", "block",
+                                "tool policy metadata is invalid", None, started,
+                                error="tool policy metadata is invalid", risk=risk)
+        decision = max((behavioral_decision, inherent_decision), key=lambda item: {"ALLOW": 0, "REVIEW": 1, "BLOCK": 2}[item])
         if decision == "BLOCK":
-            reason = f"risk score {score} exceeds block threshold"
+            reason = ("inherent tool policy prohibits this action" if inherent_decision == "BLOCK"
+                      else f"hybrid risk score {score}/100 exceeds the block threshold")
             return self._finish(action_id, tool, arguments, target, "blocked", "block", reason,
                                 None, started, error=reason, risk=risk)
         if decision == "REVIEW":
             approval_id = str(uuid4())
             expires = datetime.now(timezone.utc) + timedelta(seconds=self.approval_ttl_seconds)
-            review_reason = f"risk score {score} requires human approval"
+            review_reason = ("inherent side-effect policy requires human approval; "
+                             f"hybrid risk score is {score}/100"
+                             if inherent_decision == "REVIEW" and behavioral_decision == "ALLOW"
+                             else f"hybrid risk score {score}/100 requires human approval")
             logged = self._record(action_id, tool, arguments, target, "review_required", "review",
                                   review_reason, {"approval_id": approval_id, "expires_at": expires.isoformat()},
                                   started, risk=risk)
@@ -300,7 +315,7 @@ class AgentGuard:
                  "related_action_id": related_action_id, "approval_id": approval_id}
         if risk:
             entry.update(risk_score=risk.get("risk_score"), risk_probability=risk.get("probability"),
-                         model_version=risk.get("model_version"))
+                         model_version=risk.get("model_version"), assessment=risk.get("assessment"))
         try:
             logged = self.logger.record(entry)
             return True, None, logged["action_id"]

@@ -189,6 +189,7 @@ def test_reviewed_action_stays_pending_then_correlates_approval_and_execution(mo
     calls = []
     original = main.TOOL_REGISTRY["calculator"]["function"]
     monkeypatch.setitem(main.TOOL_REGISTRY["calculator"], "function", lambda expression: calls.append(expression) or {"result": 2420})
+    monkeypatch.setitem(main.TOOL_REGISTRY["calculator"], "minimum_decision", "REVIEW")
     monkeypatch.setattr(main, "Agent", _agent_factory(
         _decision({"action": "tool", "name": "calculator", "arguments": {"expression": "44*55"}}),
         _decision({"action": "final", "answer": "The calculation is pending review."}),

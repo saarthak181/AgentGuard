@@ -22,3 +22,8 @@ Without `AGENTGUARD_APPROVER_TOKEN`, approvals are unavailable. This local phase
 ## Dashboard boundary
 
 The Next.js dashboard is a client for read-only monitoring and authenticated approval/settings requests. It does not run tools, select policy outcomes, or replace backend enforcement. FastAPI allows only the configured local dashboard CORS origins (`AGENTGUARD_CORS_ORIGINS`); keep this list limited to trusted origins. Approval and threshold mutation routes require the approver token, while thresholds submitted to `/settings` are range-checked by the backend. Runtime threshold updates are in-memory and reset on restart; configure environment thresholds for startup policy.
+# Risk scoring
+
+AgentGuard applies mandatory deterministic restrictions before scoring. For a validated request, `security.risk.assess` creates one operational risk indicator using `0.40 * inherent + 0.30 * contextual + 0.20 * behavioral + 0.10 * ML`.
+
+The result is an indicator for ALLOW/REVIEW/BLOCK policy, not a calibrated probability. The ML output remains uncalibrated and is used only as the 10% ML signal. Tool metadata sets inherent risk and may require review independently of the numeric result for side-effecting actions. A missing or invalid model remains fail-closed.
