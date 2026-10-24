@@ -2,11 +2,14 @@ export const API_URL = (typeof window === "undefined" ? process.env.NEXT_PUBLIC_
 export async function api<T>(path:string, options:RequestInit={}):Promise<T>{
   const headers = new Headers(options.headers); headers.set("Content-Type","application/json");
   if(typeof window!=="undefined"){const token=sessionStorage.getItem("agentguard_approver"); if(token)headers.set("X-Approver-Token",token);}
-  const response=await fetch(`${API_URL}${path}`,{...options,headers,cache:"no-store"});
+  let response:Response;
+  try{response=await fetch(`${API_URL}${path}`,{...options,headers,cache:"no-store"});}
+  catch{throw new Error(`Cannot reach AgentGuard API at ${API_URL}. Start the backend and confirm the URL in Settings.`);}
   if(!response.ok){let detail=`API request failed (${response.status})`; try{const body=await response.json();detail=body.detail||detail;}catch{} throw new Error(detail);}
   return response.json() as Promise<T>;
 }
-export type Action={action_id:string;timestamp:string;agent_id:string;session_id:string;task_id:string|null;executed:boolean;tool:string;arguments:Record<string,unknown>;target_resource:string|null;result_summary:string;status:string;decision:string;reason:string;duration_ms:number;risk_score:number|null;risk_probability:number|null;model_version:string|null;related_action_id:string|null;approval_id:string|null};
+export type RiskAssessment={policy_version:string;inherent_risk:number;contextual_risk:number;behavioral_risk:number;ml_risk:number;final_risk_score:number;formula:string};
+export type Action={action_id:string;timestamp:string;agent_id:string;session_id:string;task_id:string|null;executed:boolean;tool:string;arguments:Record<string,unknown>;target_resource:string|null;result_summary:string;status:string;decision:string;reason:string;duration_ms:number;risk_score:number|null;risk_probability:number|null;model_version:string|null;assessment?:RiskAssessment|null;related_action_id:string|null;approval_id:string|null};
 export type Page<T>={items:T[];total:number;limit:number;offset:number};
 export type TaskSummary={task_id:string;session_id:string;task:string;status:string;answer:string|null;error:string|null;created_at:string;updated_at:string;duration_ms:number|null};
 export type TaskAnalytics={total_actions:number;allowed:number;blocked:number;review_required:number;failed:number;highest_risk_score:number|null;average_risk_score:number|null;tools_used:string[]};
