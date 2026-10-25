@@ -1,0 +1,1 @@
+Fictional incident report. Timeline: malformed import rejected at 09:14 UTC and isolated at 09:20. Affected staging worker only; no credentials or production records exposed. Corrective actions: parser tests, validation alerts, and review.

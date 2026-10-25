@@ -22,7 +22,10 @@ class ActionOut(BaseModel):
     reason: str
     duration_ms: float
     risk_score: int | None = None
+    """Operational 0-100 policy indicator, never a maliciousness probability."""
     risk_probability: float | None = None
+    raw_ml_probability: float | None = None
+    calibrated_ml_probability: float | None = None
     model_version: str | None = None
     assessment: dict | None = None
     related_action_id: str | None = None

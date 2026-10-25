@@ -42,7 +42,11 @@ class ActionRecord(Base):
     reason: Mapped[str] = mapped_column(Text)
     duration_ms: Mapped[float] = mapped_column(Float)
     risk_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # risk_probability is a deprecated compatibility alias for calibrated ML
+    # probability when available; it is never the operational risk score.
     risk_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_ml_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_ml_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     assessment_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     related_action_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
@@ -68,6 +72,8 @@ class PendingApproval(Base):
     arguments_json: Mapped[str] = mapped_column(Text)
     argument_hash: Mapped[str] = mapped_column(String(64))
     target_resource: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    requester_identity: Mapped[str | None] = mapped_column(String(220), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     risk_score: Mapped[int] = mapped_column(Integer)
     risk_probability: Mapped[float] = mapped_column(Float)
     model_version: Mapped[str] = mapped_column(String(100))

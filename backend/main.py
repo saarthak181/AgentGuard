@@ -80,7 +80,9 @@ def _task_detail(db: Session, row: TaskRecord) -> TaskDetail:
         session_id=item.session_id, task_id=item.task_id, executed=item.executed, tool=item.tool, arguments=json.loads(item.arguments_json),
         target_resource=item.target_resource, result_summary=item.result_summary, status=item.status,
         decision=item.decision, reason=item.reason, duration_ms=item.duration_ms,
-        risk_score=item.risk_score, risk_probability=item.risk_probability, model_version=item.model_version, assessment=json.loads(item.assessment_json) if item.assessment_json else None,
+        risk_score=item.risk_score, risk_probability=item.risk_probability,
+        raw_ml_probability=item.raw_ml_probability, calibrated_ml_probability=item.calibrated_ml_probability,
+        model_version=item.model_version, assessment=json.loads(item.assessment_json) if item.assessment_json else None,
         related_action_id=item.related_action_id, approval_id=item.approval_id) for item in records]
     event_rows = db.execute(select(SecurityEvent, ActionRecord).join(
         ActionRecord, SecurityEvent.action_id == ActionRecord.action_id).where(
@@ -172,7 +174,8 @@ def task_actions(task_id: str, limit: int = Query(50, ge=1, le=200),
             session_id=r.session_id, task_id=r.task_id, executed=r.executed, tool=r.tool, arguments=json.loads(r.arguments_json),
             target_resource=r.target_resource, result_summary=r.result_summary, status=r.status,
             decision=r.decision, reason=r.reason, duration_ms=r.duration_ms, risk_score=r.risk_score,
-            risk_probability=r.risk_probability, model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
+            risk_probability=r.risk_probability, raw_ml_probability=r.raw_ml_probability,
+            calibrated_ml_probability=r.calibrated_ml_probability, model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
             related_action_id=r.related_action_id, approval_id=r.approval_id) for r in rows]
         return ActionsPage(items=items, total=total, limit=limit, offset=offset)
     except (SQLAlchemyError, ValueError) as exc:
@@ -213,6 +216,7 @@ def actions(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
                                    target_resource=item.target_resource, result_summary=item.result_summary,
                                    status=item.status, decision=item.decision, reason=item.reason, duration_ms=item.duration_ms,
                                    risk_score=item.risk_score, risk_probability=item.risk_probability,
+                                   raw_ml_probability=item.raw_ml_probability, calibrated_ml_probability=item.calibrated_ml_probability,
                                     model_version=item.model_version, assessment=json.loads(item.assessment_json) if item.assessment_json else None, related_action_id=item.related_action_id,
                                    approval_id=item.approval_id))
         return ActionsPage(items=items, total=total, limit=limit, offset=offset)
@@ -274,7 +278,9 @@ def session_actions(session_id: str, limit: int = Query(50, ge=1, le=200), offse
         return ActionsPage(items=[ActionOut(action_id=r.action_id, timestamp=r.timestamp, agent_id=r.agent_id,
             session_id=r.session_id, task_id=r.task_id, executed=r.executed, tool=r.tool, arguments=json.loads(r.arguments_json), target_resource=r.target_resource,
             result_summary=r.result_summary, status=r.status, decision=r.decision, reason=r.reason, duration_ms=r.duration_ms,
-            risk_score=r.risk_score, risk_probability=r.risk_probability, model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
+            risk_score=r.risk_score, risk_probability=r.risk_probability,
+            raw_ml_probability=r.raw_ml_probability, calibrated_ml_probability=r.calibrated_ml_probability,
+            model_version=r.model_version, assessment=json.loads(r.assessment_json) if r.assessment_json else None,
             related_action_id=r.related_action_id, approval_id=r.approval_id) for r in records], total=total, limit=limit, offset=offset)
     except (SQLAlchemyError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="session actions unavailable") from exc
@@ -344,7 +350,19 @@ def resolve_approval(approval_id: str, request: ApprovalRequest,
                      approver_token: str | None = Header(None, alias="X-Approver-Token"),
                      db: Session = Depends(get_db)):
     pending = db.get(PendingApproval, approval_id)
-    result = runtime_guard.resolve_approval(approval_id, request.decision, request.approver_id, approver_token)
+    # The request executor is short-lived per task. Recreate its identity for
+    # approval binding/revalidation instead of using the process-global guard.
+    original = db.get(ActionRecord, pending.action_id) if pending else None
+    approval_guard = runtime_guard
+    if (runtime_guard.authorized(approver_token) and original and
+            (runtime_guard.session_id != original.session_id or runtime_guard.agent_id != original.agent_id)):
+        approval_guard = AgentGuard(runtime_guard.tools, logger=runtime_guard.logger,
+                                    agent_id=original.agent_id, session_id=original.session_id,
+                                    task_id=original.task_id, predictor=runtime_guard.predictor,
+                                    thresholds=runtime_guard.thresholds,
+                                    approval_ttl_seconds=runtime_guard.approval_ttl_seconds,
+                                    approver_token=runtime_guard.approver_token)
+    result = approval_guard.resolve_approval(approval_id, request.decision, request.approver_id, approver_token)
     if result.get("status") == "allowed" and not result.get("audit_persisted"):
         result["status"] = "failed"
         result["error"] = "Approved action executed, but its completion audit could not be persisted."
@@ -365,6 +383,6 @@ def resolve_approval(approval_id: str, request: ApprovalRequest,
         raise HTTPException(status_code=401, detail=result.get("error"))
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=result.get("error"))
-    if result["status"] in {"already_resolved", "expired", "blocked", "failed"}:
+    if result["status"] in {"already_resolved", "expired", "blocked", "failed", "audit_uncertain"}:
         raise HTTPException(status_code=409, detail=result.get("error") or result["status"])
     return {**result, "approval_id": approval_id}

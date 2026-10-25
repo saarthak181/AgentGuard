@@ -10,6 +10,7 @@ from backend.main import app
 from backend.models import ActionRecord, PendingApproval
 from security.guard import AgentGuard
 from security.logger import AuditLogger
+from security.logger import AuditLogError
 from ml.predictor import RiskPredictor
 
 
@@ -116,6 +117,8 @@ def test_approved_action_executes_exactly_once_and_is_audited(tmp_path):
         records = db.scalars(select(ActionRecord).where(ActionRecord.related_action_id == pending.action_id)).all()
         assert {r.tool for r in records} == {"approval", "calculator"}
         assert all(r.approval_id == pending.approval_id for r in records)
+        approval = next(r for r in records if r.tool == "approval")
+        assert approval.status == "approved" and approval.executed is False
     finally:
         db.close()
 
@@ -146,6 +149,26 @@ def test_approved_tool_failure_is_audited(tmp_path):
         assert execution and execution.status == "failed" and "approved tool failed" in execution.result_summary
     finally:
         db.close()
+
+
+def test_final_audit_failure_after_approved_execution_is_explicit(tmp_path):
+    calls = []
+    guard = make_guard(tmp_path, tool=lambda **args: calls.append(args) or {"result": 2})
+    original_record = guard.logger.record
+    record_count = 0
+
+    def fail_only_completion(entry):
+        nonlocal record_count
+        record_count += 1
+        if record_count == 3:  # review request, approval decision, then execution outcome
+            raise AuditLogError("completion sink unavailable")
+        return original_record(entry)
+
+    guard.logger.record = fail_only_completion
+    pending = request_review(guard)
+    result = guard.resolve_approval(pending.approval_id, "approve", "alice", "authorized-secret")
+    assert result["status"] == "audit_uncertain" and result["executed"] is True
+    assert calls == [{"expression": "1+1"}]
 
 
 def test_unauthorized_approval_is_rejected_without_execution(tmp_path):
@@ -203,6 +226,16 @@ def test_modified_approval_expiry_is_rejected(tmp_path):
     finally:
         db.close()
     result = guard.resolve_approval(pending.approval_id, "approve", "alice", "authorized-secret")
+    assert result["status"] == "rejected" and calls == []
+
+
+def test_approval_is_bound_to_requester_identity(tmp_path):
+    calls = []
+    guard = make_guard(tmp_path, tool=lambda **args: calls.append(args))
+    pending = request_review(guard)
+    other_guard = AgentGuard(guard.tools, guard.logger, session_id="other-session", predictor=guard.predictor,
+                             approver_token="authorized-secret")
+    result = other_guard.resolve_approval(pending.approval_id, "approve", "alice", "authorized-secret")
     assert result["status"] == "rejected" and calls == []
 
 

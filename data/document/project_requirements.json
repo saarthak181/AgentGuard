@@ -1,0 +1,30 @@
+{
+  "project_name": "Orion Portal",
+  "objectives": [
+    "safe inventory search"
+  ],
+  "functional_requirements": [
+    "search products",
+    "validate CSV"
+  ],
+  "non_functional_requirements": [
+    "audit logging",
+    "approvals"
+  ],
+  "milestones": [
+    {
+      "name": "pilot",
+      "due_date": "2026-05-26"
+    }
+  ],
+  "dependencies": [
+    "inventory API mock"
+  ],
+  "risks": [
+    "supplier latency"
+  ],
+  "acceptance_criteria": [
+    "bounded search",
+    "approved file changes"
+  ]
+}

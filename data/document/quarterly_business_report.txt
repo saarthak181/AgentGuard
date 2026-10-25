@@ -1,0 +1,6 @@
+Sample quarterly report
+Q1 revenue 248000 expenses 186000 profit 62000 growth 6%.
+Q2 revenue 267000 expenses 194000 profit 73000 growth 7.7%.
+Q3 revenue 291000 expenses 207000 profit 84000 growth 9%.
+Q4 revenue 316000 expenses 223000 profit 93000 growth 8.6%.
+Best product Insight Pro; North region 354000. Risks: supplier lead times. Recommendation: qualify a second supplier.

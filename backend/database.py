@@ -50,7 +50,7 @@ def init_db() -> None:
     # Additive SQLite migration for Phase 2 databases; existing actions are kept intact.
     if _engine.dialect.name in {"sqlite", "postgresql"}:
         columns = {item["name"] for item in inspect(_engine).get_columns("actions")}
-        additions = {"risk_score": "INTEGER", "risk_probability": "FLOAT", "model_version": "VARCHAR(100)", "assessment_json": "TEXT", "task_id": "VARCHAR(36)",
+        additions = {"risk_score": "INTEGER", "risk_probability": "FLOAT", "raw_ml_probability": "FLOAT", "calibrated_ml_probability": "FLOAT", "model_version": "VARCHAR(100)", "assessment_json": "TEXT", "task_id": "VARCHAR(36)",
                      "executed": "BOOLEAN NOT NULL DEFAULT FALSE",
                      "related_action_id": "VARCHAR(36)", "approval_id": "VARCHAR(36)"}
         with _engine.begin() as connection:
@@ -58,6 +58,11 @@ def init_db() -> None:
                 if column not in columns:
                     connection.exec_driver_sql(f"ALTER TABLE actions ADD COLUMN {column} {sql_type}")
             connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_actions_task_id ON actions (task_id)")
+            approval_columns = {item["name"] for item in inspect(_engine).get_columns("pending_approvals")}
+            approval_additions = {"requester_identity": "VARCHAR(220)", "policy_version": "VARCHAR(100)"}
+            for column, sql_type in approval_additions.items():
+                if column not in approval_columns:
+                    connection.exec_driver_sql(f"ALTER TABLE pending_approvals ADD COLUMN {column} {sql_type}")
 
 
 def get_session() -> Session:
@@ -91,6 +96,7 @@ def persist_action(entry: dict[str, Any]) -> None:
             result_summary=str(entry["result_summary"]), status=entry["status"],
             decision=entry["decision"], reason=entry["reason"], duration_ms=entry["duration_ms"],
             risk_score=entry.get("risk_score"), risk_probability=entry.get("risk_probability"),
+            raw_ml_probability=entry.get("raw_ml_probability"), calibrated_ml_probability=entry.get("calibrated_ml_probability"),
             model_version=entry.get("model_version"), assessment_json=json.dumps(entry.get("assessment"), ensure_ascii=False) if entry.get("assessment") is not None else None, related_action_id=entry.get("related_action_id"),
             approval_id=entry.get("approval_id"),
         )
@@ -106,18 +112,21 @@ def persist_action(entry: dict[str, Any]) -> None:
         session.close()
 
 
-def recent_actions(session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+def recent_actions(session_id: str, limit: int = 20, agent_id: str | None = None) -> list[dict[str, Any]]:
     init_db()
     session = get_session()
     try:
-        rows = session.scalars(select(ActionRecord).where(
+        query = select(ActionRecord).where(
             ActionRecord.session_id == session_id,
             ActionRecord.status != "authorization_granted",
             ActionRecord.tool != "approval",
         )
-                               .order_by(ActionRecord.timestamp.desc()).limit(limit)).all()
-        return [{"tool": row.tool, "arguments": json.loads(row.arguments_json),
-                 "target_resource": row.target_resource, "status": row.status} for row in reversed(rows)]
+        if agent_id is not None:
+            query = query.where(ActionRecord.agent_id == agent_id)
+        rows = session.scalars(query.order_by(ActionRecord.timestamp.desc()).limit(limit)).all()
+        return [{"action_id": row.action_id, "timestamp": row.timestamp.isoformat(), "tool": row.tool,
+                 "arguments": json.loads(row.arguments_json), "target_resource": row.target_resource,
+                 "status": row.status} for row in reversed(rows)]
     finally:
         session.close()
 
@@ -224,6 +233,7 @@ def _pending_dict(item: PendingApproval) -> dict[str, Any]:
             "arguments": json.loads(item.arguments_json), "argument_hash": item.argument_hash,
             "target_resource": item.target_resource, "risk_score": item.risk_score,
             "risk_probability": item.risk_probability, "model_version": item.model_version,
+            "requester_identity": item.requester_identity, "policy_version": item.policy_version,
             "created_at": created_at, "expires_at": expires_at, "status": item.status,
             "approver_id": item.approver_id}
 

@@ -16,7 +16,7 @@ from ml.policy import RiskThresholds
 from ml.predictor import RiskPredictor, RiskUnavailable
 from .logger import AuditLogError, AuditLogger
 from .rules import mandatory_denial
-from .risk import assess
+from .risk import POLICY_VERSION, assess
 
 
 @dataclass
@@ -90,9 +90,11 @@ class AgentGuard:
                                 None, started, error=error, risk=risk)
 
         assessment = assess(tool, spec, arguments, history, risk)
+        assessment.update(raw_ml_probability=risk.get("raw_ml_probability", risk.get("probability")),
+                          calibrated_ml_probability=risk.get("calibrated_ml_probability"))
         score = assessment["final_risk_score"]
-        # Persist the authoritative hybrid indicator.  The original model
-        # output remains available as risk_probability and in the explanation.
+        # Persist the authoritative hybrid indicator separately. risk_probability
+        # remains a deprecated compatibility alias for the ML probability only.
         risk = {**risk, "risk_score": score, "assessment": assessment}
         behavioral_decision = self.thresholds.classify(score)
         inherent_decision = str(spec.get("minimum_decision", "ALLOW")).upper()
@@ -124,7 +126,9 @@ class AgentGuard:
                 create_pending_approval({
                     "approval_id": approval_id, "action_id": action_id, "tool": tool,
                     "arguments_json": json.dumps(arguments, ensure_ascii=False, sort_keys=True),
-                    "argument_hash": _approval_hash(action_id, tool, arguments, target, expires),
+                    "argument_hash": _approval_hash(action_id, tool, arguments, target, expires,
+                                                     self._requester_identity(), POLICY_VERSION),
+                    "requester_identity": self._requester_identity(), "policy_version": POLICY_VERSION,
                     "target_resource": str(target)[:512] if target is not None else None,
                     "risk_score": score, "risk_probability": risk["probability"],
                     "model_version": risk["model_version"], "created_at": datetime.now(timezone.utc),
@@ -135,7 +139,7 @@ class AgentGuard:
                 self._record(str(uuid4()), tool, arguments, target, "failed", "block", error, None, started,
                              risk=risk, related_action_id=action_id)
                 return self._result(action_id, tool, "blocked", "block", error, None, started, False, error, risk)
-            self._remember(tool, arguments, target, "review_required")
+            self._remember(tool, arguments, target, "review_required", action_id)
             return self._result(action_id, tool, "review_required", "review", review_reason,
                                 {"approval_id": approval_id, "expires_at": expires.isoformat()}, started,
                                 True, "human approval required", risk, approval_id)
@@ -192,8 +196,11 @@ class AgentGuard:
         args = claimed["arguments"]
         task_id = get_action_task_id(claimed["action_id"])
         expected_hash = _approval_hash(claimed["action_id"], claimed["tool"], args,
-                                       claimed["target_resource"], claimed["expires_at"])
-        if not hmac.compare_digest(expected_hash, claimed["argument_hash"]):
+                                       claimed["target_resource"], claimed["expires_at"],
+                                       claimed.get("requester_identity"), claimed.get("policy_version"))
+        if (not hmac.compare_digest(expected_hash, claimed["argument_hash"]) or
+                claimed.get("requester_identity") != self._requester_identity() or
+                claimed.get("policy_version") != POLICY_VERSION):
             finish_pending_approval(approval_id, "rejected", approver_id)
             self._record(str(uuid4()), "approval", {"approval_id": approval_id}, claimed["target_resource"],
                          "blocked", "block", "approval payload integrity check failed", None, time.perf_counter(),
@@ -213,7 +220,12 @@ class AgentGuard:
             history = self._history_snapshot()
             new_risk = self.predictor.predict({"tool": claimed["tool"], "arguments": args,
                                                "target_resource": claimed["target_resource"]}, history)
-            if self.thresholds.classify(new_risk["risk_score"]) == "BLOCK":
+            assessment = assess(claimed["tool"], spec, args, history, new_risk)
+            assessment.update(raw_ml_probability=new_risk.get("raw_ml_probability", new_risk.get("probability")),
+                              calibrated_ml_probability=new_risk.get("calibrated_ml_probability"))
+            new_risk = {**new_risk, "risk_score": assessment["final_risk_score"], "assessment": assessment}
+            if (self.thresholds.classify(new_risk["risk_score"]) == "BLOCK" or
+                    str(spec.get("minimum_decision", "ALLOW")).upper() == "BLOCK"):
                 raise RiskUnavailable("risk now exceeds the block threshold")
         except Exception as exc:
             finish_pending_approval(approval_id, "rejected", approver_id)
@@ -224,11 +236,11 @@ class AgentGuard:
 
         approval_audit = self._record(str(uuid4()), "approval", {"approval_id": approval_id, "decision": decision,
                                                                   "approver_id": approver_id}, claimed["target_resource"],
-                                      "allowed" if decision == "approve" else "blocked",
+                                      "approved" if decision == "approve" else "rejected",
                                       "allow" if decision == "approve" else "block",
                                       f"human {decision} by {approver_id}", None, time.perf_counter(),
                                       risk=new_risk, related_action_id=claimed["action_id"], approval_id=approval_id,
-                                      task_id_override=task_id, executed=True)
+                                      task_id_override=task_id, executed=False)
         if not approval_audit[0]:
             finish_pending_approval(approval_id, "failed", approver_id)
             return {"status": "failed", "executed": False, "error": "approval could not be durably audited"}
@@ -246,8 +258,18 @@ class AgentGuard:
                                  "allow", "human-approved execution" if not error else "approved tool failed",
                                  result, start, error=error, risk=new_risk, related_action_id=claimed["action_id"],
                                  approval_id=approval_id, task_id_override=task_id)
-        finish_pending_approval(approval_id, "approved" if status == "allowed" else "failed", approver_id)
-        self._remember(claimed["tool"], args, claimed["target_resource"], status)
+        final_status = "approved" if status == "allowed" else "failed"
+        if not execution[0] and status == "allowed":
+            # The side effect completed but no durable completion record exists.
+            # Keep that uncertainty visible for operator reconciliation.
+            final_status = "audit_uncertain"
+        finish_pending_approval(approval_id, final_status, approver_id)
+        self._remember(claimed["tool"], args, claimed["target_resource"], status, execution[2])
+        if final_status == "audit_uncertain":
+            return {"status": "audit_uncertain", "executed": True, "result": result,
+                    "error": "Tool execution completed but its final audit record was not durable; reconcile before retrying.",
+                    "audit_persisted": False, "action_id": claimed["action_id"],
+                    "execution_action_id": execution[2], "approval_id": approval_id}
         return {"status": status, "executed": status == "allowed", "result": result,
                 "error": error or (None if execution[0] else "execution audit persistence failed"),
                 "audit_persisted": execution[0], "action_id": claimed["action_id"],
@@ -282,12 +304,16 @@ class AgentGuard:
 
     def _history_snapshot(self) -> list[dict[str, Any]]:
         from backend.database import recent_actions
-        persisted = recent_actions(self.session_id, 20)
+        persisted = recent_actions(self.session_id, 20, agent_id=self.agent_id)
         # Include in-memory events when a test/custom logger has no DB persistence.
-        known = {(item.get("tool"), item.get("target_resource"), item.get("status")) for item in persisted}
+        known = {item.get("action_id") for item in persisted}
         history = persisted + [item for item in self._history
-                               if (item.get("tool"), item.get("target_resource"), item.get("status")) not in known]
+                               if item.get("action_id") not in known]
         return history[-20:]
+
+    def _requester_identity(self) -> str:
+        """Stable local identity used in approval bindings in this single-tenant app."""
+        return f"{self.agent_id}:{self.session_id}"
 
     def _finish(self, action_id, tool, arguments, target, status, decision, reason, result, started,
                 error=None, risk=None, related_action_id=None, approval_id=None, executed=False):
@@ -297,7 +323,7 @@ class AgentGuard:
         if not persisted:
             error = f"{error}; {log_error}" if error else log_error
             reason = f"{reason}; audit persistence failed"
-        self._remember(tool, arguments, target, status)
+        self._remember(tool, arguments, target, status, action_id)
         return self._result(action_id, tool, status, decision, reason, result, started, persisted,
                             error, risk, approval_id, executed)
 
@@ -315,6 +341,8 @@ class AgentGuard:
                  "related_action_id": related_action_id, "approval_id": approval_id}
         if risk:
             entry.update(risk_score=risk.get("risk_score"), risk_probability=risk.get("probability"),
+                         raw_ml_probability=risk.get("raw_ml_probability", risk.get("probability")),
+                         calibrated_ml_probability=risk.get("calibrated_ml_probability"),
                          model_version=risk.get("model_version"), assessment=risk.get("assessment"))
         try:
             logged = self.logger.record(entry)
@@ -331,17 +359,21 @@ class AgentGuard:
                                risk.get("probability") if risk else None,
                                risk.get("model_version") if risk else None, approval_id, executed)
 
-    def _remember(self, tool, arguments, target, status):
-        self._history.append({"tool": tool, "arguments": arguments, "target_resource": target, "status": status})
+    def _remember(self, tool, arguments, target, status, action_id=None):
+        self._history.append({"action_id": action_id or str(uuid4()),
+                              "timestamp": datetime.now(timezone.utc).isoformat(), "tool": tool,
+                              "arguments": arguments, "target_resource": target, "status": status})
         self._history = self._history[-20:]
 
 
-def _approval_hash(action_id: str, tool: str, arguments: Any, target: Any, expires_at: datetime) -> str:
+def _approval_hash(action_id: str, tool: str, arguments: Any, target: Any, expires_at: datetime,
+                   requester_identity: str | None = None, policy_version: str | None = None) -> str:
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     expiry = expires_at.astimezone(timezone.utc).isoformat()
     payload = json.dumps({"action_id": action_id, "tool": tool, "arguments": arguments,
-                          "target": target, "expires_at": expiry},
+                          "target": target, "expires_at": expiry,
+                          "requester_identity": requester_identity, "policy_version": policy_version},
                          ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

@@ -16,10 +16,11 @@ import sklearn
 import xgboost
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import (average_precision_score, confusion_matrix, f1_score,
-                             precision_score, recall_score)
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.metrics import (average_precision_score, brier_score_loss, confusion_matrix, f1_score,
+                             log_loss, precision_score, recall_score)
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
 from .dataset import ATTACK_FAMILIES, generate_dataset, read_jsonl, write_jsonl
@@ -27,7 +28,7 @@ from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, feature_vector
 
 DEFAULT_DATASET = Path("ml/data/synthetic_traces.jsonl")
 DEFAULT_ARTIFACTS = Path("ml/artifacts")
-MODEL_VERSION = "agentguard-behavior-v1"
+MODEL_VERSION = "agentguard-behavior-v2"
 
 
 def build_matrix(events: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str | None]]:
@@ -66,8 +67,28 @@ def _metrics(y_true: np.ndarray, pred: np.ndarray, probability: np.ndarray) -> d
         "f1": float(f1_score(y_true, pred, zero_division=0)),
         "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
         "false_positive_rate": float(fp / max(1, fp + tn)),
+        "false_negative_rate": float(fn / max(1, fn + tp)),
         "pr_auc": float(average_precision_score(y_true, probability)) if len(np.unique(y_true)) > 1 else None,
     }
+
+
+def _calibration_metrics(y_true: np.ndarray, probability: np.ndarray, bins: int = 10) -> dict[str, Any]:
+    """Held-out calibration metrics; equal-width bins are documented for reproducibility."""
+    probabilities = np.clip(np.asarray(probability, dtype=float), 0, 1)
+    ece = 0.0
+    reliability = []
+    for lower in np.linspace(0, 1, bins, endpoint=False):
+        upper = lower + 1 / bins
+        mask = (probabilities >= lower) & ((probabilities < upper) if upper < 1 else (probabilities <= upper))
+        if mask.any():
+            mean_prediction = float(probabilities[mask].mean())
+            observed_frequency = float(y_true[mask].mean())
+            ece += float(mask.mean()) * abs(mean_prediction - observed_frequency)
+            reliability.append({"lower": float(lower), "upper": float(upper), "count": int(mask.sum()),
+                                "mean_prediction": mean_prediction, "observed_frequency": observed_frequency})
+    return {"brier_score": float(brier_score_loss(y_true, probabilities)),
+            "log_loss": float(log_loss(y_true, probabilities, labels=[0, 1])),
+            "expected_calibration_error": ece, "bins": bins, "reliability_curve": reliability}
 
 
 def split_by_trace(x: np.ndarray, y: np.ndarray, groups: np.ndarray,
@@ -81,16 +102,25 @@ def split_by_trace(x: np.ndarray, y: np.ndarray, groups: np.ndarray,
 
 def split_trace_partitions(x: np.ndarray, y: np.ndarray, groups: np.ndarray, seed: int = 2026,
                            test_size: float = .2, validation_size: float = .2):
-    """Create disjoint train/validation/test sets grouped by trace, for model selection without test leakage."""
+    """Create stratified, disjoint trace partitions without leaking a trace.
+
+    The validation partition is calibration-only; the final test partition is
+    never used to fit a model, calibrator, or selection threshold.
+    """
     if not 0 < test_size < 1 or not 0 < validation_size < 1 or test_size + validation_size >= 1:
         raise ValueError("test_size and validation_size must be positive and sum to less than 1")
-    all_indexes = np.arange(len(y))
-    first = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
-    train_validation_idx, test_idx = next(first.split(x, y, groups=groups))
+    if len(set(groups)) < 6:
+        raise ValueError("at least six independent traces are required for train, calibration, and test partitions")
+    test_folds = max(2, round(1 / test_size))
+    first = StratifiedGroupKFold(n_splits=test_folds, shuffle=True, random_state=seed)
+    first_splits = list(first.split(x, y, groups=groups))
+    train_validation_idx, test_idx = first_splits[seed % len(first_splits)]
     relative_validation_size = validation_size / (1 - test_size)
-    second = GroupShuffleSplit(n_splits=1, test_size=relative_validation_size, random_state=seed + 1)
-    train_rel, validation_rel = next(second.split(x[train_validation_idx], y[train_validation_idx],
-                                                   groups=groups[train_validation_idx]))
+    validation_folds = max(2, round(1 / relative_validation_size))
+    second = StratifiedGroupKFold(n_splits=validation_folds, shuffle=True, random_state=seed + 1)
+    second_splits = list(second.split(x[train_validation_idx], y[train_validation_idx],
+                                     groups=groups[train_validation_idx]))
+    train_rel, validation_rel = second_splits[(seed + 1) % len(second_splits)]
     train_idx = train_validation_idx[train_rel]
     validation_idx = train_validation_idx[validation_rel]
     if (set(groups[train_idx]) & set(groups[validation_idx]) or
@@ -154,7 +184,12 @@ def train_and_evaluate(dataset_path: str | Path = DEFAULT_DATASET,
 
     test_families = [families[i] for i in test_idx]
     family_metrics = {}
-    selected_probability = fitted[selected].predict_proba(x[test_idx])[:, 1]
+    validation_raw = fitted[selected].predict_proba(x[validation_idx])[:, 1]
+    # Logistic (Platt) calibration is fitted only on the dedicated validation
+    # partition; the held-out test partition is never used to fit it.
+    calibrator = LogisticRegression(random_state=seed).fit(validation_raw.reshape(-1, 1), y[validation_idx])
+    selected_raw_probability = fitted[selected].predict_proba(x[test_idx])[:, 1]
+    selected_probability = calibrator.predict_proba(selected_raw_probability.reshape(-1, 1))[:, 1]
     for family in ATTACK_FAMILIES:
         mask = np.array([item == family for item in test_families], dtype=bool)
         if mask.any():
@@ -176,18 +211,30 @@ def train_and_evaluate(dataset_path: str | Path = DEFAULT_DATASET,
         "evaluation_traces": len(set(groups[test_idx])),
         "train_events": len(train_idx), "validation_events": len(validation_idx), "evaluation_events": len(test_idx),
         "class_counts_train": {"normal": int(negatives), "malicious": int(positives)},
-        "split_strategy": "GroupShuffleSplit by trace_id; all trace events stay in one partition",
+        "split_strategy": "StratifiedGroupKFold by trace_id; all trace events stay in one partition",
         "model_selection": "best Random Forest or XGBoost validation F1; final metrics use untouched test partition",
         "preprocessing": "SimpleImputer(median), fitted on training partition only",
         "versions": {"python": platform.python_version(), "scikit_learn": sklearn.__version__, "xgboost": xgboost.__version__},
+        "probability_semantics": "raw classifier score plus sigmoid-calibrated score; final AgentGuard risk is separate",
     }
-    bundle = {"estimator": fitted[selected], "model_version": MODEL_VERSION,
+    bundle = {"estimator": fitted[selected], "calibrator": calibrator, "model_version": MODEL_VERSION,
               "selected_model": selected, "feature_schema_version": FEATURE_SCHEMA_VERSION,
               "feature_names": list(FEATURE_NAMES), "metadata": metadata}
-    joblib.dump(bundle, artifact_dir / "model_bundle.joblib")
+    # Write then replace so a concurrently starting backend sees either the
+    # previous complete artifact or the new complete artifact, never a partial
+    # joblib stream.
+    artifact_path = artifact_dir / "model_bundle.joblib"
+    temporary_artifact = artifact_path.with_suffix(".joblib.tmp")
+    joblib.dump(bundle, temporary_artifact)
+    temporary_artifact.replace(artifact_path)
     report = {"metadata": metadata, "selected_model": selected, "validation_metrics": validation_metrics,
               "metrics": evaluations,
               "per_attack_family": family_metrics, "threshold": .5,
+              "calibration": {"method": "sigmoid logistic regression fitted on validation partition", "validation_events": len(validation_idx),
+                              "test_raw": _calibration_metrics(y[test_idx], selected_raw_probability),
+                              "test_calibrated": _calibration_metrics(y[test_idx], selected_probability),
+                              "test_raw_classification": _metrics(y[test_idx], (selected_raw_probability >= .5).astype(int), selected_raw_probability),
+                              "test_calibrated_classification": evaluations[selected]},
               "warning": "Synthetic-data evaluation only; does not establish real-world detection performance."}
     (artifact_dir / "evaluation.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     (artifact_dir / "training_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
